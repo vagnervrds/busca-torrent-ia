@@ -190,6 +190,31 @@ const TorrentEvaluation = sequelize.define('TorrentEvaluation', {
   }
 });
 
+// Modelo de Cache SWR (CacheEntry)
+// Armazena snapshots de respostas custosas para a estratégia Stale-While-Revalidate
+const CacheEntry = sequelize.define('CacheEntry', {
+  key: {
+    type: DataTypes.STRING,
+    primaryKey: true
+  },
+  data: {
+    type: DataTypes.TEXT, // JSON serializado do payload
+    allowNull: false
+  },
+  cachedAt: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    defaultValue: DataTypes.NOW
+  },
+  ttl: {
+    type: DataTypes.INTEGER, // Tempo de vida em segundos
+    allowNull: false,
+    defaultValue: 30
+  }
+}, {
+  timestamps: false // Gerenciamos cachedAt manualmente
+});
+
 // Modelo de Logs do Agente (AgentLog)
 const AgentLog = sequelize.define('AgentLog', {
   id: {
@@ -237,6 +262,18 @@ async function initDatabase() {
     // A coluna já existe ou a tabela foi criada agora por sync()
   }
   
+  // Cria tabela de cache SWR se não existir (compatibilidade com bancos existentes)
+  try {
+    await sequelize.getQueryInterface().createTable('CacheEntries', {
+      key: { type: DataTypes.STRING, primaryKey: true },
+      data: { type: DataTypes.TEXT, allowNull: false },
+      cachedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
+      ttl: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 30 }
+    });
+  } catch (e) {
+    // Tabela já existe
+  }
+  
   // Seed de Configurações do Sistema Padrão se não existirem
   const defaultSettings = [
     { key: 'aiProvider', value: 'openai' },
@@ -276,5 +313,6 @@ module.exports = {
   TorrentResult,
   TorrentEvaluation,
   AgentLog,
+  CacheEntry,
   initDatabase
 };

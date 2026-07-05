@@ -1,5 +1,6 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const fs = require('fs');
 const { Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource } = require('./database');
 
 // Habilita o plugin stealth para evitar detecção de robô
@@ -27,6 +28,135 @@ async function getSettings() {
     preferredLanguage: settings.preferredLanguage || 'Português',
     preferredResolution: settings.preferredResolution || '1080p'
   };
+}
+
+// Detecta o executável do Chromium do sistema (necessário em DietPi/Linux ARM)
+// O Puppeteer bundled frequentemente não funciona em ARM ou distros minimalistas
+function detectChromiumExecutable() {
+  const candidates = [
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/snap/bin/chromium'
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) {
+        console.log(`[Puppeteer] Chromium do sistema encontrado em: ${p}`);
+        return p;
+      }
+    } catch (e) {}
+  }
+  console.log('[Puppeteer] Chromium do sistema não encontrado. Usando bundled do Puppeteer.');
+  return null; // Usa o bundled
+}
+
+// Garante que não há instâncias de browser vazando antes de lançar um novo
+// Percorre o activeSearches e fecha browsers de buscas já encerradas
+async function ensureNoBrowserLeaks() {
+  const idsParaLimpar = [];
+  
+  for (const [searchId, active] of activeSearches.entries()) {
+    if (!active || !active.browser) continue;
+    
+    try {
+      // Verifica no banco se a busca ainda está de fato ativa
+      const search = await Search.findByPk(searchId);
+      const isInactive = !search || 
+        ['stopped', 'completed', 'failed'].includes(search.status) ||
+        active.token.stopped;
+        
+      if (isInactive) {
+        console.log(`[BrowserLeakGuard] Fechando browser órfão da busca #${searchId} (status: ${search?.status || 'não encontrada'})`);
+        try {
+          await active.browser.close();
+        } catch (e) {
+          // Ignora se já estava fechado
+        }
+        idsParaLimpar.push(searchId);
+      }
+    } catch (e) {
+      console.error(`[BrowserLeakGuard] Erro ao verificar busca #${searchId}:`, e.message);
+    }
+  }
+  
+  for (const id of idsParaLimpar) {
+    activeSearches.delete(id);
+  }
+  
+  if (idsParaLimpar.length > 0) {
+    console.log(`[BrowserLeakGuard] ${idsParaLimpar.length} browser(s) órfão(s) encerrado(s).`);
+  }
+}
+
+// Lanca o browser com retry (até 3 tentativas) e timeout estendido para hardware limitado
+// Remove --single-process que é a causa direta do erro de WS timeout no Linux
+async function launchBrowserWithRetry(searchId) {
+  // Limpa browsers órfãos antes de lançar novo
+  await ensureNoBrowserLeaks();
+  
+  const executablePath = detectChromiumExecutable();
+  
+  // Flags otimizadas para DietPi/Linux ARM com hardware limitado
+  // NOTA: --single-process REMOVIDA intencionalmente — causa timeout de WS no Linux
+  const launchArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',       // Crítico em hardware limitado (pouca /dev/shm)
+    '--disable-blink-features=AutomationControlled',
+    '--window-size=1366,768',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-extensions',
+    '--no-zygote',                   // Reduz uso de processos filhos
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-sync',
+    '--disable-translate',
+    '--mute-audio',
+    '--no-first-run',
+    '--disable-infobars'
+  ];
+  
+  const launchOptions = {
+    headless: true,
+    args: launchArgs,
+    timeout: 90000,          // 90s para hardware lento como DietPi
+    protocolTimeout: 90000   // Também estende o timeout do protocolo CDP
+  };
+  
+  if (executablePath) {
+    launchOptions.executablePath = executablePath;
+  }
+  
+  const maxAttempts = 3;
+  let lastError = null;
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (attempt > 1) {
+        const delay = attempt * 3000; // 3s, 6s entre tentativas
+        await logAgent(searchId, `[Puppeteer] Tentativa ${attempt}/${maxAttempts} de iniciar o browser (aguardando ${delay/1000}s)...`, 'warn');
+        await new Promise(r => setTimeout(r, delay));
+      }
+      
+      const browser = await puppeteer.launch(launchOptions);
+      if (attempt > 1) {
+        await logAgent(searchId, `[Puppeteer] Browser iniciado com sucesso na tentativa ${attempt}.`, 'info');
+      }
+      return browser;
+    } catch (err) {
+      lastError = err;
+      console.error(`[Puppeteer] Falha ao iniciar browser (tentativa ${attempt}/${maxAttempts}):`, err.message);
+      
+      if (attempt < maxAttempts) {
+        await logAgent(searchId, `[Puppeteer] Falha ao iniciar browser: ${err.message}. Tentando novamente...`, 'warn');
+      }
+    }
+  }
+  
+  throw new Error(`Falha ao iniciar o browser após ${maxAttempts} tentativas. Último erro: ${lastError?.message}`);
 }
 
 // Helper para logs com SSE
@@ -459,23 +589,10 @@ async function runSearchAgent(searchId, resumeMode = true) {
     }
     await logAgent(searchId, `Palavras-chave iniciais geradas pela IA: ${currentKeywords.join(', ')}`, 'info');
     
-    // Inicializa o Puppeteer com flags otimizadas para baixo uso de recursos
+    // Inicializa o Puppeteer com retry e flags otimizadas para DietPi/Linux ARM
     if (token.stopped) throw new Error('SEARCH_STOPPED');
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1366,768',
-        '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--disable-extensions',
-        '--no-zygote',
-        '--single-process'
-      ]
-    });
+    await logAgent(searchId, 'Iniciando browser (Chromium)...', 'info');
+    browser = await launchBrowserWithRetry(searchId);
     
     const active = activeSearches.get(searchId);
     if (active) active.browser = browser;

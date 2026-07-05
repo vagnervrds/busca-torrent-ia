@@ -1,6 +1,6 @@
 const express = require('express');
 const path = require('path');
-const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource } = require('./database');
+const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry } = require('./database');
 const { enqueueSearch, stopSearchAgent, testConnection } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
@@ -79,6 +79,71 @@ global.sseBroadcast = (searchId, eventData) => {
     });
   }
 };
+
+// --- CACHE SWR (Stale-While-Revalidate) ---
+// Retorna dado em cache imediatamente (mesmo que velho) e revalida em background.
+// Isso garante que o frontend não fica travado esperando queries pesadas no DietPi.
+async function withSWRCache(key, ttlSeconds, fetchFn) {
+  try {
+    const cached = await CacheEntry.findByPk(key);
+    
+    if (cached) {
+      const ageMs = Date.now() - new Date(cached.cachedAt).getTime();
+      const isStale = ageMs > cached.ttl * 1000;
+      
+      if (!isStale) {
+        // Cache válido: retorna direto sem revalidar
+        return JSON.parse(cached.data);
+      }
+      
+      // Cache stale: retorna imediatamente E revalida em background
+      const staleData = JSON.parse(cached.data);
+      
+      // Revalida de forma assíncrona (não bloqueia a resposta)
+      setImmediate(async () => {
+        try {
+          const freshData = await fetchFn();
+          await CacheEntry.upsert({
+            key,
+            data: JSON.stringify(freshData),
+            cachedAt: new Date(),
+            ttl: ttlSeconds
+          });
+        } catch (e) {
+          console.error(`[SWR Cache] Erro ao revalidar "${key}":`, e.message);
+        }
+      });
+      
+      return staleData;
+    }
+  } catch (e) {
+    console.error(`[SWR Cache] Erro ao ler cache "${key}":`, e.message);
+  }
+  
+  // Cache miss: busca dado fresco, armazena e retorna
+  const freshData = await fetchFn();
+  try {
+    await CacheEntry.upsert({
+      key,
+      data: JSON.stringify(freshData),
+      cachedAt: new Date(),
+      ttl: ttlSeconds
+    });
+  } catch (e) {
+    console.error(`[SWR Cache] Erro ao gravar cache "${key}":`, e.message);
+  }
+  return freshData;
+}
+
+// Invalida uma ou mais entradas do cache SWR
+async function invalidateCache(...keys) {
+  try {
+    const { Op } = require('sequelize');
+    await CacheEntry.destroy({ where: { key: { [Op.in]: keys } } });
+  } catch (e) {
+    // Não é crítico se falhar
+  }
+}
 
 // --- ROTAS DA API ---
 
@@ -308,6 +373,8 @@ app.post('/api/searches/:id/stop', async (req, res) => {
   const searchId = Number(req.params.id);
   try {
     await stopSearchAgent(searchId);
+    // Invalida o cache para forçar refresh imediato do status
+    await invalidateCache(`search_detail_${searchId}`, 'searches_list');
     res.json({ success: true, message: 'Solicitação de parada enviada.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -339,6 +406,9 @@ app.post('/api/searches/:id/restart', async (req, res) => {
 
     global.sseBroadcast(searchId, { type: 'restart', data: { resume } });
 
+    // Invalida o cache para forçar refresh imediato do novo status
+    await invalidateCache(`search_detail_${searchId}`, 'searches_list');
+
     // Inicia o agente em segundo plano assincronamente via fila
     enqueueSearch(searchId, resume);
 
@@ -360,22 +430,29 @@ app.get('/api/searches', async (req, res) => {
         [Op.like]: `%${q.trim()}%`
       };
     }
-
-    const searches = await Search.findAll({
-      where,
-      order: [['updatedAt', 'DESC']],
-      limit: 10
+    
+    // Chave de cache: inclui o filtro de query para não misturar resultados filtrados
+    const cacheKey = `searches_list${q ? '_q_' + q.trim() : ''}`;
+    
+    const data = await withSWRCache(cacheKey, 15, async () => {
+      const searches = await Search.findAll({
+        where,
+        order: [['updatedAt', 'DESC']],
+        limit: 10
+      });
+      
+      const searchesWithStats = await Promise.all(searches.map(async (search) => {
+        const resultsCount = await TorrentResult.count({ where: { searchId: search.id } });
+        return {
+          ...search.toJSON(),
+          resultsCount
+        };
+      }));
+      
+      return searchesWithStats;
     });
     
-    const searchesWithStats = await Promise.all(searches.map(async (search) => {
-      const resultsCount = await TorrentResult.count({ where: { searchId: search.id } });
-      return {
-        ...search.toJSON(),
-        resultsCount
-      };
-    }));
-
-    res.json(searchesWithStats);
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -385,18 +462,22 @@ app.get('/api/searches', async (req, res) => {
 app.get('/api/searches/:id', async (req, res) => {
   const searchId = Number(req.params.id);
   try {
-    const search = await Search.findByPk(searchId, {
-      include: [
-        { model: TorrentResult, as: 'results' },
-        { model: AgentLog, as: 'logs', order: [['createdAt', 'ASC']] }
-      ]
+    const data = await withSWRCache(`search_detail_${searchId}`, 10, async () => {
+      const search = await Search.findByPk(searchId, {
+        include: [
+          { model: TorrentResult, as: 'results' },
+          { model: AgentLog, as: 'logs', order: [['createdAt', 'ASC']] }
+        ]
+      });
+      if (!search) return null;
+      return search.toJSON();
     });
 
-    if (!search) {
+    if (!data) {
       return res.status(404).json({ error: 'Busca não encontrada.' });
     }
 
-    res.json(search);
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -412,6 +493,9 @@ app.delete('/api/searches/:id', async (req, res) => {
     if (!deleted) {
       return res.status(404).json({ error: 'Busca não encontrada.' });
     }
+    
+    // Invalida o cache desta busca e a lista geral
+    await invalidateCache(`search_detail_${searchId}`, 'searches_list');
     
     res.json({ success: true, message: 'Busca excluída com sucesso.' });
   } catch (err) {
@@ -533,9 +617,14 @@ app.post('/api/deluge/add', async (req, res) => {
     const torrentId = await client.addMagnet(magnetLink);
     res.json({ success: true, torrentId });
   } catch (err) {
+    // Torrent já existe na sessão — não é um erro real
+    if (err.message && err.message.includes('already in session')) {
+      return res.json({ success: true, alreadyExists: true });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 // Adiciona múltiplos torrents simultaneamente
 app.post('/api/deluge/add-multiple', async (req, res) => {
@@ -551,7 +640,12 @@ app.post('/api/deluge/add-multiple', async (req, res) => {
         const torrentId = await client.addMagnet(magnet);
         results.push({ magnetLink: magnet, success: true, torrentId });
       } catch (err) {
-        results.push({ magnetLink: magnet, success: false, error: err.message });
+        // Torrent já existe na sessão — não é um erro real
+        if (err.message && err.message.includes('already in session')) {
+          results.push({ magnetLink: magnet, success: true, alreadyExists: true });
+        } else {
+          results.push({ magnetLink: magnet, success: false, error: err.message });
+        }
       }
     }
     res.json({ success: true, results });
@@ -596,6 +690,29 @@ app.post('/api/deluge/torrents/:id/remove', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// Remove todos os torrents com erro (com opção de apagar dados do disco)
+app.post('/api/deluge/torrents/remove-errors', async (req, res) => {
+  const { removeData = true } = req.body;
+  try {
+    const client = await getDelugeClient();
+    const torrents = await client.getStatus();
+    const ids = Object.keys(torrents);
+    const errorIds = ids.filter(id => torrents[id].state === 'Error');
+    
+    if (errorIds.length === 0) {
+      return res.json({ success: true, count: 0 });
+    }
+    
+    const promises = errorIds.map(id => client.remove(id, removeData === true));
+    await Promise.all(promises);
+    
+    res.json({ success: true, count: errorIds.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 // Inicialização do Banco de Dados e Servidor
 initDatabase().then(async () => {
