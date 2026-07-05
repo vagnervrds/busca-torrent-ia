@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource } = require('./database');
-const { runSearchAgent, stopSearchAgent, testConnection } = require('./agent');
+const { enqueueSearch, stopSearchAgent, testConnection } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
 
@@ -294,10 +294,8 @@ app.post('/api/search', async (req, res) => {
       status: 'pending'
     });
 
-    // Inicia o agente em segundo plano assincronamente
-    runSearchAgent(search.id, false).catch(err => {
-      console.error(`Erro na execução do agente #${search.id}:`, err);
-    });
+    // Inicia o agente em segundo plano assincronamente via fila
+    enqueueSearch(search.id, false);
 
     res.status(201).json(search);
   } catch (err) {
@@ -341,9 +339,8 @@ app.post('/api/searches/:id/restart', async (req, res) => {
 
     global.sseBroadcast(searchId, { type: 'restart', data: { resume } });
 
-    runSearchAgent(searchId, resume).catch(err => {
-      console.error(`Erro ao reiniciar o agente #${searchId}:`, err);
-    });
+    // Inicia o agente em segundo plano assincronamente via fila
+    enqueueSearch(searchId, resume);
 
     res.json(search);
   } catch (err) {
@@ -478,6 +475,53 @@ app.get('/api/deluge/torrents', async (req, res) => {
   }
 });
 
+// Rota SSE para streaming de status e lista de torrents do Deluge em tempo real
+app.get('/api/deluge/stream', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  let isSending = false;
+
+  const sendUpdate = async () => {
+    if (isSending) return;
+    isSending = true;
+
+    try {
+      let disponivel = false;
+      let port = null;
+      let torrents = {};
+
+      try {
+        const client = await getDelugeClient();
+        torrents = await client.getStatus();
+        disponivel = true;
+        port = client.port;
+      } catch (err) {
+        disponivel = false;
+      }
+
+      res.write(`data: ${JSON.stringify({ disponivel, port, torrents })}\n\n`);
+    } catch (e) {
+      // Ignora erros ao fechar conexão
+    } finally {
+      isSending = false;
+    }
+  };
+
+  // Envia atualização inicial imediatamente
+  await sendUpdate();
+
+  // Envia atualizações a cada 3 segundos
+  const intervalId = setInterval(sendUpdate, 3000);
+
+  req.on('close', () => {
+    clearInterval(intervalId);
+    res.end();
+  });
+});
+
 // Adiciona um torrent via magnet link individual
 app.post('/api/deluge/add', async (req, res) => {
   const { magnetLink } = req.body;
@@ -554,7 +598,21 @@ app.post('/api/deluge/torrents/:id/remove', async (req, res) => {
 });
 
 // Inicialização do Banco de Dados e Servidor
-initDatabase().then(() => {
+initDatabase().then(async () => {
+  // Reseta buscas que ficaram travadas no estado "searching" devido a quedas/reinicializações
+  try {
+    const { Search } = require('./database');
+    const [affectedCount] = await Search.update(
+      { status: 'stopped' },
+      { where: { status: 'searching' } }
+    );
+    if (affectedCount > 0) {
+      console.log(`[Startup] Redefinidas ${affectedCount} buscas travadas em "searching" para "stopped".`);
+    }
+  } catch (err) {
+    console.error("Erro ao limpar buscas travadas na inicialização:", err);
+  }
+
   // Executa a verificação inicial do Deluge de forma assíncrona
   verificarDeluge().catch(err => {
     console.error("Erro na verificação inicial do Deluge:", err.message);

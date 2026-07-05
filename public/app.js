@@ -5,7 +5,7 @@ let activeSearchData = { results: [], logs: [] };
 let eventSource = null;
 let searchSources = [];
 let delugeOnline = false;
-let delugePollingInterval = null;
+let delugeEventSource = null;
 let delugeRemoveTargetId = null;
 
 // Elementos do DOM
@@ -183,10 +183,7 @@ function showNewSearchForm() {
   activeSearchSection.classList.add('hidden');
   settingsSection.classList.add('hidden');
   delugeSection.classList.add('hidden');
-  if (delugePollingInterval) {
-    clearInterval(delugePollingInterval);
-    delugePollingInterval = null;
-  }
+  closeDelugeSSE();
   activeSearchQueryTitle.innerText = "Nova Busca Inteligente";
   queryInput.value = '';
   
@@ -220,10 +217,7 @@ function showSettingsSection() {
   activeSearchSection.classList.add('hidden');
   settingsSection.classList.remove('hidden');
   delugeSection.classList.add('hidden');
-  if (delugePollingInterval) {
-    clearInterval(delugePollingInterval);
-    delugePollingInterval = null;
-  }
+  closeDelugeSSE();
   activeSearchQueryTitle.innerText = "Configurações Globais";
   
   renderSearchesList();
@@ -566,10 +560,7 @@ async function selectSearch(id) {
     activeSearchSection.classList.remove('hidden');
     settingsSection.classList.add('hidden'); // Oculta configurações
     delugeSection.classList.add('hidden');
-    if (delugePollingInterval) {
-      clearInterval(delugePollingInterval);
-      delugePollingInterval = null;
-    }
+    closeDelugeSSE();
     
     renderSearchesList();
     
@@ -740,6 +731,74 @@ function closeSSE() {
     eventSource.close();
     eventSource = null;
   }
+}
+
+function setupDelugeSSE() {
+  closeDelugeSSE();
+  
+  delugeTorrentsContainer.innerHTML = `
+    <div class="flex flex-col items-center justify-center p-8 text-slate-400 dark:text-slate-500">
+      <div class="animate-spin rounded-full h-8 w-8 border-2 border-brand-500 border-t-transparent mb-3"></div>
+      <p class="text-xs">Conectando ao painel do Deluge...</p>
+    </div>`;
+    
+  delugeEventSource = new EventSource('/api/deluge/stream');
+  
+  delugeEventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      delugeOnline = data.disponivel;
+      
+      if (delugeOnline) {
+        delugeStatusDot.className = "w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/20";
+        delugeStatusDot.title = `Deluge Online (Porta: ${data.port})`;
+        
+        delugePanelStatusBadge.className = "px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/10 text-emerald-600 border border-emerald-500/20";
+        delugePanelStatusBadge.innerText = "Online";
+        delugePanelOfflineAlert.classList.add('hidden');
+        
+        renderDelugeTorrents(data.torrents || {});
+      } else {
+        delugeStatusDot.className = "w-2.5 h-2.5 rounded-full bg-slate-400";
+        delugeStatusDot.title = "Deluge Offline ou Indisponível";
+        
+        delugePanelStatusBadge.className = "px-2 py-0.5 text-[10px] font-bold rounded-full bg-red-500/10 text-red-600 border border-red-500/20";
+        delugePanelStatusBadge.innerText = "Offline";
+        delugePanelOfflineAlert.classList.remove('hidden');
+        
+        delugeTorrentsContainer.innerHTML = `
+          <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-8 rounded-2xl text-center text-slate-400 dark:text-slate-500 shadow-sm">
+            <i class="ph-bold ph-warning text-3xl mb-2 text-amber-500 opacity-60"></i>
+            <h4 class="font-bold text-slate-700 dark:text-slate-350">Deluge não disponível</h4>
+            <p class="text-xs max-w-sm mx-auto mt-1">Não foi possível obter a listagem de torrents pois o serviço Deluge está offline.</p>
+          </div>`;
+          
+        delugeStatTotal.innerText = '0';
+        delugeStatDownloading.innerText = '0';
+        delugeStatDlSpeed.innerText = '0 KB/s';
+        delugeStatUlSpeed.innerText = '0 KB/s';
+      }
+    } catch (err) {
+      console.error("Erro ao processar dados do SSE do Deluge:", err);
+    }
+  };
+  
+  delugeEventSource.onerror = (err) => {
+    console.error("Erro na conexão SSE do Deluge:", err);
+    closeDelugeSSE();
+    
+    // Tenta reconectar após 5 segundos se ainda estiver na aba do Deluge
+    if (!delugeSection.classList.contains('hidden')) {
+      setTimeout(setupDelugeSSE, 5000);
+    }
+  };
+}
+
+function closeDelugeSSE() {
+  if (delugeEventSource) {
+    delugeEventSource.close();
+    delugeEventSource = null;
+  }
 }
 
 // --- RENDERIZADORES DO SIDEBAR E TELA PRINCIPAL ---
@@ -1094,22 +1153,21 @@ function copyAllMagnetLinks() {
 
 // --- FUNÇÕES DE INTEGRAÇÃO DO DELUGE ---
 
-function showDelugeSection() {
-  activeSearchId = null;
-  closeSSE();
-  
-  newSearchSection.classList.add('hidden');
-  activeSearchSection.classList.add('hidden');
-  settingsSection.classList.add('hidden');
-  delugeSection.classList.remove('hidden');
-  activeSearchQueryTitle.innerText = "Gerenciador Deluge";
-  
-  renderSearchesList();
-  fetchDelugeTorrents();
-  
-  // Polling a cada 3 segundos
-  if (delugePollingInterval) clearInterval(delugePollingInterval);
-  delugePollingInterval = setInterval(fetchDelugeTorrents, 3000);
+function showDelugeSection() {
+  activeSearchId = null;
+  closeSSE();
+  closeDelugeSSE();
+  
+  newSearchSection.classList.add('hidden');
+  activeSearchSection.classList.add('hidden');
+  settingsSection.classList.add('hidden');
+  delugeSection.classList.remove('hidden');
+  activeSearchQueryTitle.innerText = "Gerenciador Deluge";
+  
+  renderSearchesList();
+  
+  // Inicia SSE para atualização em tempo real
+  setupDelugeSSE();
 }
 
 async function checkDelugeStatus() {
@@ -1140,122 +1198,124 @@ async function checkDelugeStatus() {
   }
 }
 
-async function fetchDelugeTorrents() {
-  await checkDelugeStatus();
-  
-  if (!delugeOnline) {
-    delugeTorrentsContainer.innerHTML = `
-      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-8 rounded-2xl text-center text-slate-400 dark:text-slate-500 shadow-sm">
-        <i class="ph-bold ph-warning text-3xl mb-2 text-amber-500 opacity-60"></i>
-        <h4 class="font-bold text-slate-700 dark:text-slate-300">Deluge não disponível</h4>
-        <p class="text-xs max-w-sm mx-auto mt-1">Não foi possível obter a listagem de torrents pois o serviço Deluge está offline.</p>
-      </div>`;
-      
-    delugeStatTotal.innerText = '0';
-    delugeStatDownloading.innerText = '0';
-    delugeStatDlSpeed.innerText = '0 KB/s';
-    delugeStatUlSpeed.innerText = '0 KB/s';
-    return;
-  }
-
-  try {
-    const res = await fetch('/api/deluge/torrents');
-    const data = await res.json();
-    
-    if (!data.success) {
-      throw new Error(data.error || "Erro ao obter torrents");
-    }
-
-    const torrents = data.torrents || {};
-    const ids = Object.keys(torrents);
-
-    // Calcular estatísticas globais
-    let total = ids.length;
-    let downloading = 0;
-    let totalDlRate = 0;
-    let totalUlRate = 0;
-
-    ids.forEach(id => {
-      const t = torrents[id];
-      if (t.state === 'Downloading') downloading++;
-      totalDlRate += t.download_payload_rate || 0;
-      totalUlRate += t.upload_payload_rate || 0;
-    });
-
-    delugeStatTotal.innerText = total;
-    delugeStatDownloading.innerText = downloading;
-    delugeStatDlSpeed.innerText = formatSpeedBytes(totalDlRate) + '/s';
-    delugeStatUlSpeed.innerText = formatSpeedBytes(totalUlRate) + '/s';
-
-    if (total === 0) {
-      delugeTorrentsContainer.innerHTML = `
-        <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-8 rounded-2xl text-center text-slate-400 dark:text-slate-500 shadow-sm">
-          <i class="ph-bold ph-download-simple text-3xl mb-2 text-brand-500 opacity-60"></i>
-          <h4 class="font-bold text-slate-700 dark:text-slate-350">Nenhum torrent em andamento</h4>
-          <p class="text-xs max-w-sm mx-auto mt-1">Os torrents adicionados aparecerão listados aqui em tempo real.</p>
-        </div>`;
-      return;
-    }
-
-    // Renderizar lista de torrents (Layout flexível otimizado para celular e desktop)
-    delugeTorrentsContainer.innerHTML = ids.map(id => {
-      const t = torrents[id];
-      const progressPercent = (t.progress || 0).toFixed(1);
-      
-      let stateBadgeColor = 'bg-slate-100 text-slate-600 dark:bg-slate-950 dark:text-slate-400';
-      if (t.state === 'Downloading') stateBadgeColor = 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20';
-      else if (t.state === 'Seeding') stateBadgeColor = 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20';
-      else if (t.state === 'Paused') stateBadgeColor = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20';
-      else if (t.state === 'Error') stateBadgeColor = 'bg-red-500/10 text-red-650 dark:text-red-400 border border-red-500/20';
-
-      const playPauseButton = t.paused
-        ? `<button onclick="resumeDelugeTorrent('${id}')" class="p-2.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-xl border border-emerald-500/20 transition-all cursor-pointer" title="Retomar Download"><i class="ph-bold ph-play text-sm"></i></button>`
-        : `<button onclick="pauseDelugeTorrent('${id}')" class="p-2.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 rounded-xl border border-amber-500/20 transition-all cursor-pointer" title="Pausar Download"><i class="ph-bold ph-pause text-sm"></i></button>`;
-
-      return `
-        <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl shadow-sm space-y-4 hover:border-slate-300 dark:hover:border-slate-700 transition-all">
-          <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-            <div class="space-y-1 flex-1 min-w-0">
-              <h4 class="font-bold text-slate-800 dark:text-slate-100 text-sm leading-snug break-words" title="${t.name}">${t.name}</h4>
-              <div class="flex flex-wrap items-center gap-2 mt-1">
-                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${stateBadgeColor}">${t.state}</span>
-                <span class="text-xs text-slate-400 font-medium">Tamanho: ${formatBytesSize(t.total_done)} / ${formatBytesSize(t.total_size)}</span>
-                <span class="text-xs text-slate-400 font-medium">• Ratio: ${t.ratio.toFixed(2)}</span>
-              </div>
-            </div>
-            
-            <!-- Ações Rápidas (Pausar/Retomar e Excluir) -->
-            <div class="flex items-center gap-2 self-start sm:self-auto mt-2 sm:mt-0 flex-shrink-0">
-              ${playPauseButton}
-              <button onclick="openDelugeRemoveModal('${id}', '${t.name.replace(/'/g, "\'")}')" class="p-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl border border-red-500/20 transition-all cursor-pointer" title="Remover Torrent"><i class="ph-bold ph-trash text-sm"></i></button>
-            </div>
-          </div>
-
-          <!-- Barra de Progresso e Métricas -->
-          <div class="space-y-1.5">
-            <div class="flex items-center justify-between text-xs font-semibold">
-              <span class="text-slate-500 dark:text-slate-450">${progressPercent}% concluído</span>
-              <span class="text-slate-450 font-mono text-[11px]">ETA: ${formatETAString(t.eta)}</span>
-            </div>
-            <div class="w-full bg-slate-100 dark:bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-200/50 dark:border-slate-850">
-              <div class="bg-gradient-to-r from-brand-500 to-indigo-500 h-full rounded-full transition-all duration-300" style="width: ${progressPercent}%"></div>
-            </div>
-          </div>
-
-          <!-- Velocidades e Conectividade -->
-          <div class="flex items-center justify-between text-[11px] text-slate-400 font-medium bg-slate-50 dark:bg-slate-950 p-2.5 rounded-xl border border-slate-200/50 dark:border-slate-850/50 gap-2 flex-wrap sm:flex-nowrap">
-            <span class="flex items-center gap-1"><i class="ph-bold ph-arrow-down text-blue-500"></i> DL: ${formatSpeedBytes(t.download_payload_rate)}/s</span>
-            <span class="flex items-center gap-1"><i class="ph-bold ph-arrow-up text-emerald-500"></i> UL: ${formatSpeedBytes(t.upload_payload_rate)}/s</span>
-            <span class="flex items-center gap-1"><i class="ph-bold ph-users"></i> Seeds: ${t.num_seeds} | Peers: ${t.num_peers}</span>
-          </div>
-        </div>`;
-    }).join('');
-
-  } catch (err) {
-    console.error("Erro ao listar torrents do Deluge:", err);
-  }
-}
-
+async function fetchDelugeTorrents() {
+  await checkDelugeStatus();
+  
+  if (!delugeOnline) {
+    delugeTorrentsContainer.innerHTML = `
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-8 rounded-2xl text-center text-slate-400 dark:text-slate-500 shadow-sm">
+        <i class="ph-bold ph-warning text-3xl mb-2 text-amber-500 opacity-60"></i>
+        <h4 class="font-bold text-slate-700 dark:text-slate-350">Deluge não disponível</h4>
+        <p class="text-xs max-w-sm mx-auto mt-1">Não foi possível obter a listagem de torrents pois o serviço Deluge está offline.</p>
+      </div>`;
+      
+    delugeStatTotal.innerText = '0';
+    delugeStatDownloading.innerText = '0';
+    delugeStatDlSpeed.innerText = '0 KB/s';
+    delugeStatUlSpeed.innerText = '0 KB/s';
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/deluge/torrents');
+    const data = await res.json();
+    
+    if (!data.success) {
+      throw new Error(data.error || "Erro ao obter torrents");
+    }
+
+    renderDelugeTorrents(data.torrents || {});
+  } catch (err) {
+    console.error("Erro ao buscar torrents:", err);
+  }
+}
+
+function renderDelugeTorrents(torrents) {
+  const ids = Object.keys(torrents);
+
+  // Calcular estatísticas globais
+  let total = ids.length;
+  let downloading = 0;
+  let totalDlRate = 0;
+  let totalUlRate = 0;
+
+  ids.forEach(id => {
+    const t = torrents[id];
+    if (t.state === 'Downloading') downloading++;
+    totalDlRate += t.download_payload_rate || 0;
+    totalUlRate += t.upload_payload_rate || 0;
+  });
+
+  delugeStatTotal.innerText = total;
+  delugeStatDownloading.innerText = downloading;
+  delugeStatDlSpeed.innerText = formatSpeedBytes(totalDlRate) + '/s';
+  delugeStatUlSpeed.innerText = formatSpeedBytes(totalUlRate) + '/s';
+
+  if (total === 0) {
+    delugeTorrentsContainer.innerHTML = `
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-8 rounded-2xl text-center text-slate-400 dark:text-slate-500 shadow-sm">
+        <i class="ph-bold ph-download-simple text-3xl mb-2 text-brand-500 opacity-60"></i>
+        <h4 class="font-bold text-slate-700 dark:text-slate-350">Nenhum torrent em andamento</h4>
+        <p class="text-xs max-w-sm mx-auto mt-1">Os torrents adicionados aparecerão listados aqui em tempo real.</p>
+      </div>`;
+    return;
+  }
+
+  // Renderizar lista de torrents (Layout flexível otimizado para celular e desktop)
+  delugeTorrentsContainer.innerHTML = ids.map(id => {
+    const t = torrents[id];
+    const progressPercent = (t.progress || 0).toFixed(1);
+    
+    let stateBadgeColor = 'bg-slate-100 text-slate-650 dark:bg-slate-950 dark:text-slate-400';
+    if (t.state === 'Downloading') stateBadgeColor = 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20';
+    else if (t.state === 'Seeding') stateBadgeColor = 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20';
+    else if (t.state === 'Paused') stateBadgeColor = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20';
+    else if (t.state === 'Error') stateBadgeColor = 'bg-red-500/10 text-red-650 dark:text-red-400 border border-red-500/20';
+
+    const playPauseButton = t.paused
+      ? `<button onclick="resumeDelugeTorrent('${id}')" class="p-2.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-xl border border-emerald-500/20 transition-all cursor-pointer" title="Retomar Download"><i class="ph-bold ph-play text-sm"></i></button>`
+      : `<button onclick="pauseDelugeTorrent('${id}')" class="p-2.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-650 dark:text-amber-400 rounded-xl border border-amber-500/20 transition-all cursor-pointer" title="Pausar Download"><i class="ph-bold ph-pause text-sm"></i></button>`;
+
+    return `
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl shadow-sm space-y-4 hover:border-slate-300 dark:hover:border-slate-700 transition-all">
+        <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+          <div class="space-y-1 flex-1 min-w-0">
+            <h4 class="font-bold text-slate-800 dark:text-slate-100 text-sm leading-snug break-words" title="&apos;${t.name}&apos;">${t.name}</h4>
+            <div class="flex flex-wrap items-center gap-2 mt-1">
+              <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${stateBadgeColor}">${t.state}</span>
+              <span class="text-xs text-slate-400 font-medium">Tamanho: ${formatBytesSize(t.total_done)} / ${formatBytesSize(t.total_size)}</span>
+              <span class="text-xs text-slate-400 font-medium">• Ratio: ${t.ratio.toFixed(2)}</span>
+            </div>
+          </div>
+          
+          <!-- Ações Rápidas (Pausar/Retomar e Excluir) -->
+          <div class="flex items-center gap-2 self-start sm:self-auto mt-2 sm:mt-0 flex-shrink-0">
+            ${playPauseButton}
+            <button onclick="openDelugeRemoveModal('${id}', '${t.name.replace(/'/g, "\\'")}')" class="p-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl border border-red-500/20 transition-all cursor-pointer" title="Remover Torrent"><i class="ph-bold ph-trash text-sm"></i></button>
+          </div>
+        </div>
+
+        <!-- Barra de Progresso e Métricas -->
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between text-xs font-semibold">
+            <span class="text-slate-500 dark:text-slate-450">${progressPercent}% concluído</span>
+            <span class="text-slate-450 font-mono text-[11px]">ETA: ${formatETAString(t.eta)}</span>
+          </div>
+          <div class="w-full bg-slate-100 dark:bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-200/50 dark:border-slate-850">
+            <div class="bg-gradient-to-r from-brand-500 to-indigo-500 h-full rounded-full transition-all duration-300" style="width: ${progressPercent}%"></div>
+          </div>
+        </div>
+
+        <!-- Velocidades e Conectividade -->
+        <div class="flex items-center justify-between text-[11px] text-slate-400 font-medium bg-slate-50 dark:bg-slate-950 p-2.5 rounded-xl border border-slate-200/50 dark:border-slate-850/50 gap-2 flex-wrap sm:flex-nowrap">
+          <span class="flex items-center gap-1"><i class="ph-bold ph-arrow-down text-blue-500"></i> DL: ${formatSpeedBytes(t.download_payload_rate)}/s</span>
+          <span class="flex items-center gap-1"><i class="ph-bold ph-arrow-up text-emerald-500"></i> UL: ${formatSpeedBytes(t.upload_payload_rate)}/s</span>
+          <span class="flex items-center gap-1"><i class="ph-bold ph-users"></i> Seeds: ${t.num_seeds} | Peers: ${t.num_peers}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
 async function sendToDeluge(magnetLink, buttonEl) {
   try {
     const origHtml = buttonEl.innerHTML;

@@ -8,6 +8,10 @@ puppeteer.use(StealthPlugin());
 // Mapa para controle de buscas ativas em memória (cancelamento imediato)
 const activeSearches = new Map(); // searchId -> { token: { stopped: false }, browser: Browser }
 
+// Fila para gerenciar a execução sequencial de buscas e economizar recursos do servidor
+const searchQueue = []; // Array of { searchId, resumeMode }
+let isProcessingQueue = false;
+
 // Helper para ler as configurações do banco em tempo real
 async function getSettings() {
   const settingsList = await SystemSetting.findAll();
@@ -94,9 +98,9 @@ function calculateCost(modelName, promptTokens, completionTokens) {
 // Helper de chamada do LLM híbrido (OpenAI ou Anthropic)
 async function callLLM(searchId, messages, jsonMode = false) {
   const config = await getSettings();
-  const maxRetries = 3;
+  const maxAttempts = 11; // 1 tentativa inicial + 10 retentativas
   
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       let endpoint = '';
       let headers = { 'Content-Type': 'application/json' };
@@ -226,17 +230,37 @@ async function callLLM(searchId, messages, jsonMode = false) {
       }
       return content;
     } catch (err) {
-      console.error(`Erro ao chamar LLM (${config.aiProvider}, tentativa ${attempt}/${maxRetries}):`, err.message);
-      if (attempt === maxRetries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * attempt));
+      console.error(`Erro ao chamar LLM (${config.aiProvider}, tentativa ${attempt}/${maxAttempts}):`, err.message);
+      if (attempt === maxAttempts) throw err;
+      
+      // Cálculo de recuo exponencial randômico (random exponential backoff)
+      const baseDelay = Math.pow(2, attempt) * 1000;
+      const jitter = Math.random() * 1000;
+      const delay = Math.min(30000, baseDelay + jitter); // Máximo de 30 segundos
+      
+      const seconds = (delay / 1000).toFixed(1);
+      await logAgent(
+        searchId, 
+        `Erro na chamada da API de IA (${config.aiProvider}): ${err.message}. Retentando (${attempt}/${maxAttempts - 1}) em ${seconds}s...`, 
+        'warn'
+      );
+      
+      await new Promise(r => setTimeout(r, delay));
     }
   }
 }
 
-// Interrompe uma busca ativa
+// Interrompe uma busca ativa ou a remove da fila se estiver pendente
 async function stopSearchAgent(searchId) {
+  // Remove da fila se estiver lá
+  const idx = searchQueue.findIndex(item => item.searchId === searchId);
+  if (idx !== -1) {
+    searchQueue.splice(idx, 1);
+    await logAgent(searchId, "Busca removida da fila antes de iniciar.", "warn");
+  }
+
   const search = await Search.findByPk(searchId);
-  if (search && search.status === 'searching') {
+  if (search && (search.status === 'searching' || search.status === 'pending')) {
     search.status = 'stopped';
     await search.save();
     await logAgent(searchId, "Busca interrompida pelo usuário.", "warn");
@@ -260,6 +284,58 @@ async function stopSearchAgent(searchId) {
   }
 }
 
+// Enfileira uma busca para execução sequencial
+function enqueueSearch(searchId, resumeMode) {
+  if (!searchQueue.some(item => item.searchId === searchId)) {
+    searchQueue.push({ searchId, resumeMode });
+    logAgent(searchId, "Busca colocada na fila de processamento.", "info").catch(console.error);
+  }
+  processSearchQueue();
+}
+
+// Processa a fila de buscas, garantindo concorrência máxima de 1 busca por vez
+async function processSearchQueue() {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
+  try {
+    // Conta quantas buscas estão ativas no momento na memória
+    let activeCount = 0;
+    for (const [id, active] of activeSearches.entries()) {
+      if (active && !active.token.stopped) {
+        activeCount++;
+      }
+    }
+
+    if (activeCount >= 1) {
+      isProcessingQueue = false;
+      return;
+    }
+
+    if (searchQueue.length === 0) {
+      isProcessingQueue = false;
+      return;
+    }
+
+    const nextItem = searchQueue.shift();
+
+    // Executa em segundo plano
+    runSearchAgent(nextItem.searchId, nextItem.resumeMode)
+      .catch(err => {
+        console.error(`Erro na execução do agente #${nextItem.searchId}:`, err);
+      })
+      .finally(() => {
+        isProcessingQueue = false;
+        // Processa o próximo da fila
+        processSearchQueue();
+      });
+
+  } catch (err) {
+    console.error("Erro no processamento da fila de buscas:", err);
+    isProcessingQueue = false;
+  }
+}
+
 // Agente Principal de Busca
 async function runSearchAgent(searchId, resumeMode = true) {
   const search = await Search.findByPk(searchId);
@@ -274,6 +350,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
   const token = { stopped: false };
   activeSearches.set(searchId, { token, browser: null });
   
+  let browser = null;
   try {
     search.status = 'searching';
     await search.save();
@@ -382,16 +459,21 @@ async function runSearchAgent(searchId, resumeMode = true) {
     }
     await logAgent(searchId, `Palavras-chave iniciais geradas pela IA: ${currentKeywords.join(', ')}`, 'info');
     
-    // Inicializa o Puppeteer
+    // Inicializa o Puppeteer com flags otimizadas para baixo uso de recursos
     if (token.stopped) throw new Error('SEARCH_STOPPED');
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
-        '--window-size=1366,768'
+        '--window-size=1366,768',
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions',
+        '--no-zygote',
+        '--single-process'
       ]
     });
     
@@ -400,6 +482,18 @@ async function runSearchAgent(searchId, resumeMode = true) {
     
     const page = await browser.newPage();
     await page.setViewport({ width: 1366, height: 768 });
+    
+    // Intercepta e aborta requisições inúteis (imagens, fontes, css, mídias) para poupar CPU/RAM/Banda
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     await page.setJavaScriptEnabled(false); // Evita execução de scripts pesados/anúncios/mineradores
     
     await page.setExtraHTTPHeaders({
@@ -972,10 +1066,9 @@ async function runSearchAgent(searchId, resumeMode = true) {
       }
     }
   } finally {
-    const active = activeSearches.get(searchId);
-    if (active && active.browser) {
+    if (browser) {
       try {
-        await active.browser.close();
+        await browser.close();
       } catch (e) {}
     }
     activeSearches.delete(searchId);
@@ -994,7 +1087,6 @@ async function checkSearchCompletion(searchId, searchModel, browserInstance, con
       if (global.sseBroadcast) {
         global.sseBroadcast(searchId, { type: 'status_change', data: { status: 'completed' } });
       }
-      try { await browserInstance.close(); } catch(e){}
       return true;
     }
     return false;
@@ -1072,10 +1164,6 @@ async function checkSearchCompletion(searchId, searchModel, browserInstance, con
         global.sseBroadcast(searchId, { type: 'status_change', data: { status: 'completed' } });
       }
       
-      try {
-        await browserInstance.close();
-      } catch (e) {}
-      
       return true;
     } else {
       await logAgent(searchId, `Avaliação de progresso: Ainda faltam arquivos (${checkResult.explanation}). Continuando busca...`, 'info');
@@ -1089,7 +1177,6 @@ async function checkSearchCompletion(searchId, searchModel, browserInstance, con
       if (global.sseBroadcast) {
         global.sseBroadcast(searchId, { type: 'status_change', data: { status: 'completed' } });
       }
-      try { await browserInstance.close(); } catch(e){}
       return true;
     }
     return false;
@@ -1222,7 +1309,7 @@ async function testConnection(config) {
 }
 
 module.exports = {
-  runSearchAgent,
+  enqueueSearch,
   stopSearchAgent,
   testConnection
 };
