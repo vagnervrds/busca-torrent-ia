@@ -59,8 +59,40 @@ async function saveResult(searchId, resultData) {
   return result;
 }
 
+// Helper para calcular o custo estimado da chamada de IA
+function calculateCost(modelName, promptTokens, completionTokens) {
+  const model = String(modelName).toLowerCase();
+  let inputRate = 0.15 / 1000000; // fallback padrão (como gpt-4o-mini)
+  let outputRate = 0.60 / 1000000;
+  
+  if (model.includes('sonnet') || model.includes('claude-3-5')) {
+    inputRate = 3.00 / 1000000;
+    outputRate = 15.00 / 1000000;
+  } else if (model.includes('haiku')) {
+    inputRate = 0.80 / 1000000;
+    outputRate = 4.00 / 1000000;
+  } else if (model.includes('opus')) {
+    inputRate = 15.00 / 1000000;
+    outputRate = 75.00 / 1000000;
+  } else if (model.includes('gpt-4o-mini')) {
+    inputRate = 0.15 / 1000000;
+    outputRate = 0.60 / 1000000;
+  } else if (model.includes('gpt-4o')) {
+    inputRate = 2.50 / 1000000;
+    outputRate = 10.00 / 1000000;
+  } else if (model.includes('flash') || model.includes('gemini-2.5') || model.includes('gemini-3')) {
+    inputRate = 0.075 / 1000000;
+    outputRate = 0.30 / 1000000;
+  } else if (model.includes('pro')) {
+    inputRate = 1.25 / 1000000;
+    outputRate = 5.00 / 1000000;
+  }
+  
+  return (promptTokens * inputRate) + (completionTokens * outputRate);
+}
+
 // Helper de chamada do LLM híbrido (OpenAI ou Anthropic)
-async function callLLM(messages, jsonMode = false) {
+async function callLLM(searchId, messages, jsonMode = false) {
   const config = await getSettings();
   const maxRetries = 3;
   
@@ -142,6 +174,35 @@ async function callLLM(messages, jsonMode = false) {
         content = data.content[0].text.trim();
       } else {
         content = data.choices[0].message.content.trim();
+      }
+      
+      // Contabiliza o custo se houver informações de usage
+      let promptTokens = 0;
+      let completionTokens = 0;
+      if (data.usage) {
+        if (config.aiProvider === 'anthropic') {
+          promptTokens = data.usage.input_tokens || 0;
+          completionTokens = data.usage.output_tokens || 0;
+        } else {
+          promptTokens = data.usage.prompt_tokens || 0;
+          completionTokens = data.usage.completion_tokens || 0;
+        }
+      }
+      
+      const callCost = calculateCost(config.aiModel, promptTokens, completionTokens);
+      if (callCost > 0) {
+        const searchRecord = await Search.findByPk(searchId);
+        if (searchRecord) {
+          searchRecord.cost = (searchRecord.cost || 0.0) + callCost;
+          await searchRecord.save();
+          
+          if (global.sseBroadcast) {
+            global.sseBroadcast(searchId, {
+              type: 'cost_change',
+              data: { cost: searchRecord.cost }
+            });
+          }
+        }
       }
       
       // Limpa blocos de código markdown se o modelo retornar ```json ... ``` ou ``` ... ```
@@ -274,7 +335,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
     ];
     
     if (token.stopped) throw new Error('SEARCH_STOPPED');
-    const sourceSelectionResult = await callLLM(selectSourcesPrompt, true);
+    const sourceSelectionResult = await callLLM(searchId, selectSourcesPrompt, true);
     const selectedSourceIds = sourceSelectionResult.selectedIds || [];
     const selectedSources = activeSources.filter(s => selectedSourceIds.includes(s.id));
     
@@ -305,9 +366,21 @@ async function runSearchAgent(searchId, resumeMode = true) {
     ];
     
     if (token.stopped) throw new Error('SEARCH_STOPPED');
-    const keywordsResult = await callLLM(keywordAnalysisPrompt, true);
-    const keywords = keywordsResult.keywords || [search.query];
-    await logAgent(searchId, `Palavras-chave geradas pela IA: ${keywords.join(', ')}`, 'info');
+    const keywordsResult = await callLLM(searchId, keywordAnalysisPrompt, true);
+    let currentKeywords = keywordsResult.keywords || [search.query];
+    
+    // Se a IA retornar vazio por algum motivo, garante o termo original
+    if (currentKeywords.length === 0) {
+      currentKeywords = [search.query];
+    }
+    
+    const attemptedKeywords = [];
+    for (const kw of currentKeywords) {
+      if (!attemptedKeywords.includes(kw)) {
+        attemptedKeywords.push(kw);
+      }
+    }
+    await logAgent(searchId, `Palavras-chave iniciais geradas pela IA: ${currentKeywords.join(', ')}`, 'info');
     
     // Inicializa o Puppeteer
     if (token.stopped) throw new Error('SEARCH_STOPPED');
@@ -339,450 +412,552 @@ async function runSearchAgent(searchId, resumeMode = true) {
     
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    // Lista para acumular torrents candidatos coletados
-    let allScrapedTorrents = [];
+    let searchCompleted = false;
+    let variationCount = 1;
+    const maxVariations = 10;
     
-    // Carrega o histórico de avaliações do DB para esta busca
-    const existingEvaluations = await TorrentEvaluation.findAll({ where: { searchId } });
-    const evaluatedMap = new Map(existingEvaluations.map(e => [e.nyaaId, e.status]));
-    
-    // Loop pelas fontes e palavras-chave
-    for (const source of selectedSources) {
-      const isNyaa = source.name.toLowerCase().includes('nyaa') || source.url.includes('nyaa.si');
+    while (variationCount <= maxVariations && !searchCompleted) {
+      if (token.stopped) throw new Error('SEARCH_STOPPED');
       
-      for (const keyword of keywords) {
-        if (token.stopped) throw new Error('SEARCH_STOPPED');
-        await logAgent(searchId, `Pesquisando no site "${source.name}" por: "${keyword}"...`, 'info');
+      await logAgent(searchId, `[Variação ${variationCount}/${maxVariations}] Iniciando busca com termos: ${currentKeywords.join(', ')}`, 'info');
+      
+      // Carrega o histórico de avaliações do DB para esta busca nesta variação
+      const existingEvaluations = await TorrentEvaluation.findAll({ where: { searchId } });
+      const evaluatedMap = new Map(existingEvaluations.map(e => [e.nyaaId, e.status]));
+      
+      // Lista para acumular torrents candidatos coletados nesta variação
+      let allScrapedTorrents = [];
+      
+      // Loop pelas fontes e palavras-chave atuais
+      for (const source of selectedSources) {
+        const isNyaa = source.name.toLowerCase().includes('nyaa') || source.url.includes('nyaa.si');
         
-        // Substitui {query} no padrão da URL de busca
-        const searchUrl = source.searchUrlPattern.replace('{query}', encodeURIComponent(keyword));
-        
-        try {
-          await page.goto(searchUrl, { waitUntil: 'load', timeout: 15000 });
+        for (const keyword of currentKeywords) {
+          if (token.stopped) throw new Error('SEARCH_STOPPED');
+          await logAgent(searchId, `Pesquisando no site "${source.name}" por: "${keyword}"...`, 'info');
           
-          let scraped = [];
+          // Substitui {query} no padrão da URL de busca
+          const searchUrl = source.searchUrlPattern.replace('{query}', encodeURIComponent(keyword));
           
-          if (isNyaa) {
-            // Parser Otimizado de Nyaa.si
-            const hasResults = await page.evaluate(() => !!document.querySelector('table.torrent-list'));
-            if (!hasResults) {
-              await logAgent(searchId, `Nenhum resultado encontrado para "${keyword}" em ${source.name}.`, 'warn');
-              continue;
-            }
+          try {
+            await page.goto(searchUrl, { waitUntil: 'load', timeout: 15000 });
             
-            scraped = await page.evaluate((sName) => {
-              const rows = Array.from(document.querySelectorAll('table.torrent-list tbody tr'));
-              return rows.map(tr => {
-                const nameLink = tr.querySelector('td:nth-child(2) a:not([class*="comments"])');
-                const magnetLink = tr.querySelector('td:nth-child(3) a[href^="magnet:"]');
-                const sizeTd = tr.querySelector('td:nth-child(4)');
-                const dateTd = tr.querySelector('td:nth-child(5)');
-                const seedsTd = tr.querySelector('td:nth-child(6)');
-                const leechesTd = tr.querySelector('td:nth-child(7)');
+            let scraped = [];
+            
+            if (isNyaa) {
+              // Parser Otimizado de Nyaa.si
+              const hasResults = await page.evaluate(() => !!document.querySelector('table.torrent-list'));
+              if (!hasResults) {
+                await logAgent(searchId, `Nenhum resultado encontrado para "${keyword}" em ${source.name}.`, 'warn');
+                continue;
+              }
+              
+              scraped = await page.evaluate((sName) => {
+                const rows = Array.from(document.querySelectorAll('table.torrent-list tbody tr'));
+                return rows.map(tr => {
+                  const nameLink = tr.querySelector('td:nth-child(2) a:not([class*="comments"])');
+                  const magnetLink = tr.querySelector('td:nth-child(3) a[href^="magnet:"]');
+                  const sizeTd = tr.querySelector('td:nth-child(4)');
+                  const dateTd = tr.querySelector('td:nth-child(5)');
+                  const seedsTd = tr.querySelector('td:nth-child(6)');
+                  const leechesTd = tr.querySelector('td:nth-child(7)');
+                  
+                  return {
+                    title: nameLink ? nameLink.innerText.trim() : '',
+                    pageUrl: nameLink ? nameLink.href : '',
+                    magnetLink: magnetLink ? magnetLink.getAttribute('href') : '',
+                    size: sizeTd ? sizeTd.innerText.trim() : '',
+                    seeders: seedsTd ? parseInt(seedsTd.innerText.trim(), 10) || 0 : 0,
+                    leechers: leechesTd ? parseInt(leechesTd.innerText.trim(), 10) || 0 : 0,
+                    sourceName: sName
+                  };
+                }).filter(r => r.title && r.magnetLink);
+              }, source.name);
+            } else {
+              // RASPAGEM GENÉRICA VIA IA PARA OUTROS SITES
+              await logAgent(searchId, `Iniciando raspagem adaptativa em ${source.name}...`, 'info');
+              
+              // Extrai todos os links do DOM da página e algum contexto de texto
+              const rawElements = await page.evaluate(() => {
+                const anchors = Array.from(document.querySelectorAll('a'));
+                return anchors.map((a, idx) => {
+                  const text = a.innerText.trim();
+                  const href = a.getAttribute('href') || '';
+                  const parentText = a.parentElement ? a.parentElement.innerText.substring(0, 150).replace(/\s+/g, ' ').trim() : '';
+                  return { index: idx, text, href, parentText };
+                }).filter(item => {
+                  const isRelevantText = item.text.length > 2;
+                  const isTorrentLink = item.href.includes('.torrent') || item.href.startsWith('magnet:') || item.href.includes('/torrent/') || item.href.includes('/view/') || item.href.includes('/download/');
+                  return isRelevantText || isTorrentLink;
+                }).slice(0, 80);
+              });
+              
+              if (rawElements.length === 0) {
+                await logAgent(searchId, `Nenhum link detectado na página de busca de ${source.name}.`, 'warn');
+                continue;
+              }
+              
+              // Pergunta ao LLM quais desses links são resultados de torrent válidos
+              const parsePrompt = [
+                {
+                  role: "system",
+                  content: "Você é um extrator de dados HTML especialista em páginas de torrent."
+                },
+                {
+                  role: "user",
+                  content: `Estamos no site "${source.name}" buscando pelo termo "${keyword}".
+                  
+                  Abaixo está a lista simplificada de links extraídos da página de busca (com seu índice de array):
+                  ${JSON.stringify(rawElements, null, 2)}
+                  
+                  Identifique quais índices correspondem a resultados de torrent reais relacionados ao termo.
+                  Para cada resultado identificado, extraia:
+                  - "title": O título do torrent ou arquivo.
+                  - "pageUrl": O link da página de detalhes do torrent. Se for um link relativo (ex: "/view/123"), resolva-o completando com a URL base "${source.url}".
+                  - "magnetLink": O link magnet completo (começando com "magnet:") se estiver contido na página de buscas. Caso contrário, retorne null.
+                  - "size": O tamanho aproximado do arquivo (ex: "1.5 GB"), se puder deduzir a partir do "parentText".
+                  - "seeders": O número inteiro de seeds, se puder deduzir a partir do "parentText" (caso não ache, coloque 0).
+                  
+                  Responda APENAS com um objeto JSON no formato:
+                  {
+                    "candidates": [
+                      { "title": "...", "pageUrl": "...", "magnetLink": "...", "size": "...", "seeders": 10 }
+                    ]
+                  }`
+                }
+              ];
+              
+              try {
+                const parseResult = await callLLM(searchId, parsePrompt, true);
+                const candidates = parseResult.candidates || [];
                 
-                return {
-                  title: nameLink ? nameLink.innerText.trim() : '',
-                  pageUrl: nameLink ? nameLink.href : '',
-                  magnetLink: magnetLink ? magnetLink.getAttribute('href') : '',
-                  size: sizeTd ? sizeTd.innerText.trim() : '',
-                  seeders: seedsTd ? parseInt(seedsTd.innerText.trim(), 10) || 0 : 0,
-                  leechers: leechesTd ? parseInt(leechesTd.innerText.trim(), 10) || 0 : 0,
-                  sourceName: sName
-                };
-              }).filter(r => r.title && r.magnetLink);
-            }, source.name);
-          } else {
-            // RASPAGEM GENÉRICA VIA IA PARA OUTROS SITES
-            await logAgent(searchId, `Iniciando raspagem adaptativa em ${source.name}...`, 'info');
-            
-            // Extrai todos os links do DOM da página e algum contexto de texto
-            const rawElements = await page.evaluate(() => {
-              const anchors = Array.from(document.querySelectorAll('a'));
-              return anchors.map((a, idx) => {
-                const text = a.innerText.trim();
-                const href = a.getAttribute('href') || '';
-                const parentText = a.parentElement ? a.parentElement.innerText.substring(0, 150).replace(/\s+/g, ' ').trim() : '';
-                return { index: idx, text, href, parentText };
-              }).filter(item => {
-                const isRelevantText = item.text.length > 2;
-                const isTorrentLink = item.href.includes('.torrent') || item.href.startsWith('magnet:') || item.href.includes('/torrent/') || item.href.includes('/view/') || item.href.includes('/download/');
-                return isRelevantText || isTorrentLink;
-              }).slice(0, 80);
-            });
-            
-            if (rawElements.length === 0) {
-              await logAgent(searchId, `Nenhum link detectado na página de busca de ${source.name}.`, 'warn');
-              continue;
+                scraped = candidates.map(c => ({
+                  title: c.title,
+                  pageUrl: c.pageUrl,
+                  magnetLink: c.magnetLink,
+                  size: c.size || 'Desconhecido',
+                  seeders: parseInt(c.seeders, 10) || 0,
+                  leechers: 0,
+                  sourceName: source.name
+                }));
+              } catch (err) {
+                await logAgent(searchId, `Falha na raspagem genérica por IA: ${err.message}`, 'warn');
+              }
             }
             
-            // Pergunta ao LLM quais desses links são resultados de torrent válidos
-            const parsePrompt = [
+            await logAgent(searchId, `Obtidos ${scraped.length} torrents brutos em ${source.name} para "${keyword}".`, 'info');
+            allScrapedTorrents = allScrapedTorrents.concat(scraped);
+            
+          } catch (err) {
+            await logAgent(searchId, `Erro ao navegar ou raspar ${source.name}: ${err.message}`, 'warn');
+          }
+        }
+      }
+      
+      // Remove duplicados pelo magnetLink ou pela URL da página (se magnet for nulo)
+      const uniqueTorrents = Array.from(
+        new Map(
+          allScrapedTorrents.map(item => [item.magnetLink || item.pageUrl, item])
+        ).values()
+      );
+      
+      // Ordena por Seeders (decrescente)
+      uniqueTorrents.sort((a, b) => b.seeders - a.seeders);
+      
+      if (uniqueTorrents.length > 0) {
+        // Filtra torrents já avaliados historicamente nesta busca
+        const pendingTorrents = uniqueTorrents.filter(torrent => {
+          const torrentId = torrent.magnetLink || torrent.pageUrl;
+          const uniqueId = torrent.magnetLink 
+            ? torrent.magnetLink.split('btih:')[1]?.split('&')[0] || torrentId 
+            : torrent.pageUrl.split('/').pop() || torrentId;
+            
+          torrent.uniqueId = uniqueId;
+          return !evaluatedMap.has(uniqueId);
+        });
+        
+        await logAgent(searchId, `Filtro concluído para a variação ${variationCount}: ${uniqueTorrents.length} torrents totais, ${pendingTorrents.length} novos para analisar com IA.`, 'info');
+        
+        if (pendingTorrents.length > 0) {
+          // Passo 3: Filtro Inicial por IA
+          const batchSize = 15;
+          const candidatesToInspect = [];
+          
+          for (let i = 0; i < pendingTorrents.length; i += batchSize) {
+            if (token.stopped) throw new Error('SEARCH_STOPPED');
+            const batch = pendingTorrents.slice(i, i + batchSize);
+            await logAgent(searchId, `Análise de relevância inicial do lote ${Math.floor(i / batchSize) + 1} de títulos...`, 'info');
+            
+            const titlesList = batch.map((t, idx) => ({ index: idx, title: t.title, seeders: t.seeders, size: t.size, source: t.sourceName }));
+            
+            const filterPrompt = [
               {
                 role: "system",
-                content: "Você é um extrator de dados HTML especialista em páginas de torrent."
+                content: "Você é um classificador de relevância de arquivos de torrent."
               },
               {
                 role: "user",
-                content: `Estamos no site "${source.name}" buscando pelo termo "${keyword}".
+                content: `O usuário busca: "${search.query}".
+                Preferências: Resolução: ${config.preferredResolution} | Idioma: ${config.preferredLanguage}.
                 
-                Abaixo está a lista simplificada de links extraídos da página de busca (com seu índice de array):
-                ${JSON.stringify(rawElements, null, 2)}
+                Aqui está uma lista de torrents encontrados (com seus índices):
+                ${JSON.stringify(titlesList, null, 2)}
                 
-                Identifique quais índices correspondem a resultados de torrent reais relacionados ao termo.
-                Para cada resultado identificado, extraia:
-                - "title": O título do torrent ou arquivo.
-                - "pageUrl": O link da página de detalhes do torrent. Se for um link relativo (ex: "/view/123"), resolva-o completando com a URL base "${source.url}".
-                - "magnetLink": O link magnet completo (começando com "magnet:") se estiver contido na página de buscas. Caso contrário, retorne null.
-                - "size": O tamanho aproximado do arquivo (ex: "1.5 GB"), se puder deduzir a partir do "parentText".
-                - "seeders": O número inteiro de seeds, se puder deduzir a partir do "parentText" (caso não ache, coloque 0).
-                
-                Responda APENAS com um objeto JSON no formato:
+                Selecione os índices correspondentes aos torrents que parecem ser o conteúdo procurado e têm boa qualidade.
+                Retorne APENAS um objeto JSON no formato:
                 {
-                  "candidates": [
-                    { "title": "...", "pageUrl": "...", "magnetLink": "...", "size": "...", "seeders": 10 }
-                  ]
+                  "selectedIndices": [0, 2]
                 }`
               }
             ];
             
             try {
-              const parseResult = await callLLM(parsePrompt, true);
-              const candidates = parseResult.candidates || [];
-              
-              scraped = candidates.map(c => ({
-                title: c.title,
-                pageUrl: c.pageUrl,
-                magnetLink: c.magnetLink,
-                size: c.size || 'Desconhecido',
-                seeders: parseInt(c.seeders, 10) || 0,
-                leechers: 0,
-                sourceName: source.name
-              }));
-            } catch (err) {
-              await logAgent(searchId, `Falha na raspagem genérica por IA: ${err.message}`, 'warn');
-            }
-          }
-          
-          await logAgent(searchId, `Obtidos ${scraped.length} torrents brutos em ${source.name} para "${keyword}".`, 'info');
-          allScrapedTorrents = allScrapedTorrents.concat(scraped);
-          
-        } catch (err) {
-          await logAgent(searchId, `Erro ao navegar ou raspar ${source.name}: ${err.message}`, 'warn');
-        }
-      }
-    }
-    
-    // Remove duplicados pelo magnetLink ou pela URL da página (se magnet for nulo)
-    const uniqueTorrents = Array.from(
-      new Map(
-        allScrapedTorrents.map(item => [item.magnetLink || item.pageUrl, item])
-      ).values()
-    );
-    
-    // Ordena por Seeders (decrescente)
-    uniqueTorrents.sort((a, b) => b.seeders - a.seeders);
-    
-    if (uniqueTorrents.length === 0) {
-      await logAgent(searchId, "Nenhum torrent encontrado após escanear todas as fontes selecionadas.", "warn");
-      search.status = 'completed';
-      await search.save();
-      await browser.close();
-      activeSearches.delete(searchId);
-      if (global.sseBroadcast) {
-        global.sseBroadcast(searchId, { type: 'status_change', data: { status: 'completed' } });
-      }
-      return;
-    }
-    
-    // Filtra torrents já avaliados historicamente nesta busca
-    const pendingTorrents = uniqueTorrents.filter(torrent => {
-      const torrentId = torrent.magnetLink || torrent.pageUrl;
-      // Usaremos o hash do link magnet ou o ID final da URL como nyaaId
-      const uniqueId = torrent.magnetLink 
-        ? torrent.magnetLink.split('btih:')[1]?.split('&')[0] || torrentId 
-        : torrent.pageUrl.split('/').pop() || torrentId;
-        
-      torrent.uniqueId = uniqueId; // guarda para uso posterior
-      return !evaluatedMap.has(uniqueId);
-    });
-    
-    await logAgent(searchId, `Filtro concluído: ${uniqueTorrents.length} torrents totais, ${pendingTorrents.length} novos para analisar com IA.`, 'info');
-    
-    if (pendingTorrents.length === 0) {
-      await logAgent(searchId, "Todos os torrents encontrados nesta página já foram avaliados anteriormente.", "info");
-      await checkSearchCompletion(searchId, search, browser, config);
-      return;
-    }
-    
-    // Passo 3: Filtro Inicial por IA (selecionar melhores títulos para poupar requisições e processamento de páginas)
-    const batchSize = 15;
-    const candidatesToInspect = [];
-    
-    for (let i = 0; i < pendingTorrents.length; i += batchSize) {
-      if (token.stopped) throw new Error('SEARCH_STOPPED');
-      const batch = pendingTorrents.slice(i, i + batchSize);
-      await logAgent(searchId, `Análise de relevância inicial do lote ${Math.floor(i / batchSize) + 1} de títulos...`, 'info');
-      
-      const titlesList = batch.map((t, idx) => ({ index: idx, title: t.title, seeders: t.seeders, size: t.size, source: t.sourceName }));
-      
-      const filterPrompt = [
-        {
-          role: "system",
-          content: "Você é um classificador de relevância de arquivos de torrent."
-        },
-        {
-          role: "user",
-          content: `O usuário busca: "${search.query}".
-          Preferências: Resolução: ${config.preferredResolution} | Idioma: ${config.preferredLanguage}.
-          
-          Aqui está uma lista de torrents encontrados (com seus índices):
-          ${JSON.stringify(titlesList, null, 2)}
-          
-          Selecione os índices correspondentes aos torrents que parecem ser o conteúdo procurado e têm boa qualidade.
-          Retorne APENAS um objeto JSON no formato:
-          {
-            "selectedIndices": [0, 2]
-          }`
-        }
-      ];
-      
-      try {
-        const filterResult = await callLLM(filterPrompt, true);
-        const indices = filterResult.selectedIndices || [];
-        for (const idx of indices) {
-          if (batch[idx]) {
-            candidatesToInspect.push(batch[idx]);
-          }
-        }
-      } catch (err) {
-        await logAgent(searchId, `Erro ao filtrar títulos: ${err.message}. Verificando lote completo.`, 'warn');
-        candidatesToInspect.push(...batch);
-      }
-    }
-    
-    await logAgent(searchId, `IA selecionou ${candidatesToInspect.length} candidatos para inspeção profunda de detalhes.`, 'info');
-    
-    // Registra os ignorados no filtro inicial para retomada
-    const candidateUniqueIds = new Set(candidatesToInspect.map(c => c.uniqueId));
-    for (const t of pendingTorrents) {
-      if (!candidateUniqueIds.has(t.uniqueId)) {
-        await TorrentEvaluation.create({
-          searchId,
-          nyaaId: t.uniqueId,
-          title: t.title,
-          status: 'ignored',
-          explanation: 'Filtro inicial por título determinou baixa relevância ou qualidade inferior.'
-        });
-      }
-    }
-    
-    // Passo 4: Inspeção Profunda de cada Candidato
-    for (const candidate of candidatesToInspect) {
-      if (token.stopped) throw new Error('SEARCH_STOPPED');
-      await logAgent(searchId, `Obtendo informações do torrent de detalhes em: "${candidate.title}"...`, 'info');
-      
-      try {
-        let detailData = { description: 'Nenhuma descrição.', files: [], extractedMagnets: [] };
-        
-        // Se a página de detalhes existe, navega até ela. Caso contrário, avalia apenas o título (se o magnet já veio na busca)
-        if (candidate.pageUrl) {
-          let targetUrl = candidate.pageUrl;
-          if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
-            try {
-              targetUrl = new URL(targetUrl, source.url).href;
-            } catch (e) {
-              await logAgent(searchId, `Ignorando URL de detalhes inválida para "${candidate.title}": ${candidate.pageUrl}`, 'warn');
-              continue;
-            }
-          }
-          await page.goto(targetUrl, { waitUntil: 'load', timeout: 15000 });
-          
-          detailData = await page.evaluate(() => {
-            const descEl = document.getElementById('torrent-description') || document.querySelector('.description') || document.querySelector('.panel-body') || document.querySelector('#description') || document.querySelector('.conteudo') || document.querySelector('.post-content');
-            const filesEl = document.querySelector('.torrent-file-list') || document.querySelector('.files') || document.querySelector('#files') || document.querySelector('.torrent-files') || document.querySelector('.tabela_dados');
-            
-            let files = [];
-            if (filesEl) {
-              files = Array.from(filesEl.querySelectorAll('li, td')).map(li => li.innerText.trim());
-            }
-            
-            const magnetElements = Array.from(document.querySelectorAll('a[href^="magnet:"]'));
-            const extractedMagnets = magnetElements.map((a, idx) => {
-              const href = a.getAttribute('href') || '';
-              let displayName = '';
-              try {
-                const dnMatch = href.match(/[?&]dn=([^&]+)/);
-                if (dnMatch) {
-                  displayName = decodeURIComponent(dnMatch[1].replace(/\+/g, ' '));
+              const filterResult = await callLLM(searchId, filterPrompt, true);
+              const indices = filterResult.selectedIndices || [];
+              for (const idx of indices) {
+                if (batch[idx]) {
+                  candidatesToInspect.push(batch[idx]);
                 }
-              } catch (e) {}
-              return {
-                index: idx,
-                linkText: a.innerText.trim(),
-                parentText: a.parentElement ? a.parentElement.innerText.substring(0, 150).replace(/\s+/g, ' ').trim() : '',
-                href,
-                displayName
-              };
-            });
-            
-            return {
-              description: descEl ? descEl.innerText.trim() : 'Nenhuma descrição.',
-              files: files.slice(0, 60),
-              extractedMagnets
-            };
-          });
-        }
-        
-        // Define a lista de links magnet para avaliar
-        let magnetsToEvaluate = detailData.extractedMagnets || [];
-        
-        // Fallback para o magnet da página de busca caso nenhum tenha sido extraído na página de detalhes
-        if (magnetsToEvaluate.length === 0 && candidate.magnetLink) {
-          let displayName = '';
-          try {
-            const dnMatch = candidate.magnetLink.match(/[?&]dn=([^&]+)/);
-            if (dnMatch) {
-              displayName = decodeURIComponent(dnMatch[1].replace(/\+/g, ' '));
-            }
-          } catch (e) {}
-          magnetsToEvaluate.push({
-            index: 0,
-            linkText: candidate.title,
-            parentText: '',
-            href: candidate.magnetLink,
-            displayName: displayName || candidate.title
-          });
-        }
-        
-        if (magnetsToEvaluate.length === 0) {
-          await logAgent(searchId, `Não foi possível encontrar nenhum link magnet para "${candidate.title}". Pulando.`, 'warn');
-          continue;
-        }
-        
-        await logAgent(searchId, `Encontrado(s) ${magnetsToEvaluate.length} link(s) magnet na página de "${candidate.title}". Enviando para avaliação da IA...`, 'info');
-        
-        // Pergunta à IA se os magnets atendem à busca
-        const evaluationPrompt = [
-          {
-            role: "system",
-            content: `Você é um avaliador inteligente de torrents. Você deve analisar uma página de detalhes de torrent e seus múltiplos links magnet para classificar e selecionar quais links individuais correspondem à busca e preferências do usuário.`
-          },
-          {
-            role: "user",
-            content: `Busca do Usuário: "${search.query}"
-            Idioma Preferido: "${config.preferredLanguage}"
-            Resolução Recomendada: "${config.preferredResolution}"
-            
-            Título do Torrent Candidato: "${candidate.title}"
-            Tamanho: "${candidate.size}"
-            Seeders: ${candidate.seeders}
-            Origem: "${candidate.sourceName}"
-            
-            Descrição da Página:
-            """
-            ${detailData.description.slice(0, 1000)}
-            """
-            
-            Arquivos contidos no Torrent:
-            """
-            ${detailData.files.join('\n')}
-            """
-            
-            Links Magnet Disponíveis na Página:
-            ${JSON.stringify(magnetsToEvaluate.map(m => ({ index: m.index, linkText: m.linkText, displayName: m.displayName, parentText: m.parentText })), null, 2)}
-            
-            Determine quais dos links magnet correspondem ao conteúdo solicitado pelo usuário.
-            Múltiplos links magnet na página podem representar tanto episódios de séries/animes quanto diferentes qualidades, tamanhos, dublagens, cortes de edição (ex: Director's Cut ou Extended) ou formatos de um filme.
-            Analise cada link de forma independente. Use o campo "displayName" (obtido diretamente do link magnet) e o texto de contexto ao redor do link para identificar o nome e detalhes específicos de cada torrent.
-            
-            Responda APENAS com um objeto JSON no formato exato:
-            {
-              "evaluatedMagnets": [
-                {
-                  "index": number,
-                  "matches": true/false,
-                  "title": "Título específico para este link (ex: 'Rick e Morty - S09E01 - 1080p Dual Áudio')",
-                  "type": "series" | "movie" | "book" | "music" | "unknown",
-                  "episodesCount": number | "movie" | "unknown",
-                  "resolution": "1080p" | "720p" | "480p" | "unknown",
-                  "hasPortugueseAudio": true/false,
-                  "hasPortugueseSubtitles": true/false,
-                  "explanation": "Breve explicação justificando a decisão para este link."
-                }
-              ]
-            }`
-          }
-        ];
-        
-        if (token.stopped) throw new Error('SEARCH_STOPPED');
-        const evalResult = await callLLM(evaluationPrompt, true);
-        const evaluatedMagnets = evalResult.evaluatedMagnets || [];
-        
-        let hasSavedAnyMatch = false;
-        
-        for (const evalItem of evaluatedMagnets) {
-          const magnetObj = magnetsToEvaluate[evalItem.index];
-          if (!magnetObj) continue;
-          
-          if (evalItem.matches) {
-            // Verifica duplicidade do link magnet antes de salvar
-            const existingResult = await TorrentResult.findOne({
-              where: {
-                searchId,
-                magnetLink: magnetObj.href
               }
-            });
+            } catch (err) {
+              await logAgent(searchId, `Erro ao filtrar títulos: ${err.message}. Verificando lote completo.`, 'warn');
+              candidatesToInspect.push(...batch);
+            }
+          }
+          
+          await logAgent(searchId, `IA selecionou ${candidatesToInspect.length} candidatos para inspeção profunda de detalhes na variação ${variationCount}.`, 'info');
+          
+          // Registra os ignorados no filtro inicial para retomada
+          const candidateUniqueIds = new Set(candidatesToInspect.map(c => c.uniqueId));
+          for (const t of pendingTorrents) {
+            if (!candidateUniqueIds.has(t.uniqueId)) {
+              await TorrentEvaluation.create({
+                searchId,
+                nyaaId: t.uniqueId,
+                title: t.title,
+                status: 'ignored',
+                explanation: 'Filtro inicial por título determinou baixa relevância ou qualidade inferior.'
+              });
+            }
+          }
+          
+          // Passo 4: Inspeção Profunda de cada Candidato
+          for (const candidate of candidatesToInspect) {
+            if (token.stopped) throw new Error('SEARCH_STOPPED');
+            await logAgent(searchId, `Obtendo informações do torrent de detalhes em: "${candidate.title}"...`, 'info');
             
-            if (!existingResult) {
-              await logAgent(searchId, `Aprovado link: "${evalItem.title}" de ${candidate.sourceName}. Raciocínio: ${evalItem.explanation}`, 'success');
+            try {
+              let detailData = { description: 'Nenhuma descrição.', files: [], extractedMagnets: [] };
               
-              await saveResult(searchId, {
-                title: evalItem.title || candidate.title,
-                magnetLink: magnetObj.href,
-                pageUrl: candidate.pageUrl || '',
-                size: candidate.size,
-                seeders: candidate.seeders,
-                leechers: candidate.leechers || 0,
-                episodes: String(evalItem.episodesCount),
-                resolution: evalItem.resolution,
-                hasPortugueseAudio: evalItem.hasPortugueseAudio,
-                hasPortugueseSubtitles: evalItem.hasPortugueseSubtitles,
-                explanation: evalItem.explanation,
-                sourceName: candidate.sourceName
+              if (candidate.pageUrl) {
+                let targetUrl = candidate.pageUrl;
+                
+                const candidateSource = selectedSources.find(s => s.name === candidate.sourceName) || selectedSources[0];
+                if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+                  try {
+                    targetUrl = new URL(targetUrl, candidateSource.url).href;
+                  } catch (e) {
+                    await logAgent(searchId, `Ignorando URL de detalhes inválida para "${candidate.title}": ${candidate.pageUrl}`, 'warn');
+                    continue;
+                  }
+                }
+                
+                await page.goto(targetUrl, { waitUntil: 'load', timeout: 15000 });
+                
+                detailData = await page.evaluate(() => {
+                  const descEl = document.getElementById('torrent-description') || document.querySelector('.description') || document.querySelector('.panel-body') || document.querySelector('#description') || document.querySelector('.conteudo') || document.querySelector('.post-content');
+                  const filesEl = document.querySelector('.torrent-file-list') || document.querySelector('.files') || document.querySelector('#files') || document.querySelector('.torrent-files') || document.querySelector('.tabela_dados');
+                  
+                  let files = [];
+                  if (filesEl) {
+                    files = Array.from(filesEl.querySelectorAll('li, td')).map(li => li.innerText.trim());
+                  }
+                  
+                  const magnetElements = Array.from(document.querySelectorAll('a[href^="magnet:"]'));
+                  const extractedMagnets = magnetElements.map((a, idx) => {
+                    const href = a.getAttribute('href') || '';
+                    let displayName = '';
+                    try {
+                      const dnMatch = href.match(/[?&]dn=([^&]+)/);
+                      if (dnMatch) {
+                        displayName = decodeURIComponent(dnMatch[1].replace(/\+/g, ' '));
+                      }
+                    } catch (e) {}
+                    return {
+                      index: idx,
+                      linkText: a.innerText.trim(),
+                      parentText: a.parentElement ? a.parentElement.innerText.substring(0, 150).replace(/\s+/g, ' ').trim() : '',
+                      href,
+                      displayName
+                    };
+                  });
+                  
+                  return {
+                    description: descEl ? descEl.innerText.trim() : 'Nenhuma descrição.',
+                    files: files.slice(0, 60),
+                    extractedMagnets
+                  };
+                });
+              }
+              
+              let magnetsToEvaluate = detailData.extractedMagnets || [];
+              
+              if (magnetsToEvaluate.length === 0 && candidate.magnetLink) {
+                let displayName = '';
+                try {
+                  const dnMatch = candidate.magnetLink.match(/[?&]dn=([^&]+)/);
+                  if (dnMatch) {
+                    displayName = decodeURIComponent(dnMatch[1].replace(/\+/g, ' '));
+                  }
+                } catch (e) {}
+                magnetsToEvaluate.push({
+                  index: 0,
+                  linkText: candidate.title,
+                  parentText: '',
+                  href: candidate.magnetLink,
+                  displayName: displayName || candidate.title
+                });
+              }
+              
+              if (magnetsToEvaluate.length === 0) {
+                await logAgent(searchId, `Não foi possível encontrar nenhum link magnet para "${candidate.title}". Pulando.`, 'warn');
+                continue;
+              }
+              
+              await logAgent(searchId, `Encontrado(s) ${magnetsToEvaluate.length} link(s) magnet na página de "${candidate.title}". Enviando para avaliação da IA...`, 'info');
+              
+              const evaluationPrompt = [
+                {
+                  role: "system",
+                  content: `Você é um avaliador inteligente de torrents. Você deve analisar uma página de detalhes de torrent e seus múltiplos links magnet para classificar e selecionar quais links individuais correspondem à busca e preferências do usuário.`
+                },
+                {
+                  role: "user",
+                  content: `Busca do Usuário: "${search.query}"
+                  Idioma Preferido: "${config.preferredLanguage}"
+                  Resolução Recomendada: "${config.preferredResolution}"
+                  
+                  Título do Torrent Candidato: "${candidate.title}"
+                  Tamanho: "${candidate.size}"
+                  Seeders: ${candidate.seeders}
+                  Origem: "${candidate.sourceName}"
+                  
+                  Descrição da Página:
+                  """
+                  ${detailData.description.slice(0, 1000)}
+                  """
+                  
+                  Arquivos contidos no Torrent:
+                  """
+                  ${detailData.files.join('\n')}
+                  """
+                  
+                  Links Magnet Disponíveis na Página:
+                  ${JSON.stringify(magnetsToEvaluate.map(m => ({ index: m.index, linkText: m.linkText, displayName: m.displayName, parentText: m.parentText })), null, 2)}
+                  
+                  Determine quais dos links magnet correspondem ao conteúdo solicitado pelo usuário.
+                  Múltiplos links magnet na página podem representar tanto episódios de séries/animes quanto diferentes qualidades, tamanhos, dublagens, cortes de edição (ex: Director's Cut ou Extended) ou formatos de um filme.
+                  Analise cada link de forma independente. Use o campo "displayName" (obtido diretamente do link magnet) e o texto de contexto ao redor do link para identificar o nome e detalhes específicos de cada torrent.
+                  
+                  Responda APENAS com um objeto JSON no formato exato:
+                  {
+                    "evaluatedMagnets": [
+                      {
+                        "index": number,
+                        "matches": true/false,
+                        "title": "Título específico para este link (ex: 'Rick e Morty - S09E01 - 1080p Dual Áudio')",
+                        "type": "series" | "movie" | "book" | "music" | "unknown",
+                        "episodesCount": number | "movie" | "unknown",
+                        "resolution": "1080p" | "720p" | "480p" | "unknown",
+                        "hasPortugueseAudio": true/false,
+                        "hasPortugueseSubtitles": true/false,
+                        "explanation": "Breve explicação justificando a decisão para este link."
+                      }
+                    ]
+                  }`
+                }
+              ];
+              
+              if (token.stopped) throw new Error('SEARCH_STOPPED');
+              const evalResult = await callLLM(searchId, evaluationPrompt, true);
+              const evaluatedMagnets = evalResult.evaluatedMagnets || [];
+              
+              let hasSavedAnyMatch = false;
+              
+              for (const evalItem of evaluatedMagnets) {
+                const magnetObj = magnetsToEvaluate[evalItem.index];
+                if (!magnetObj) continue;
+                
+                if (evalItem.matches) {
+                  const existingResult = await TorrentResult.findOne({
+                    where: {
+                      searchId,
+                      magnetLink: magnetObj.href
+                    }
+                  });
+                  
+                  if (!existingResult) {
+                    await logAgent(searchId, `Aprovado link: "${evalItem.title}" de ${candidate.sourceName}. Raciocínio: ${evalItem.explanation}`, 'success');
+                    
+                    await saveResult(searchId, {
+                      title: evalItem.title || candidate.title,
+                      magnetLink: magnetObj.href,
+                      pageUrl: candidate.pageUrl || '',
+                      size: candidate.size,
+                      seeders: candidate.seeders,
+                      leechers: 0,
+                      episodes: String(evalItem.episodesCount),
+                      resolution: evalItem.resolution,
+                      hasPortugueseAudio: evalItem.hasPortugueseAudio,
+                      hasPortugueseSubtitles: evalItem.hasPortugueseSubtitles,
+                      explanation: evalItem.explanation,
+                      sourceName: candidate.sourceName
+                    });
+                    
+                    hasSavedAnyMatch = true;
+                  } else {
+                    await logAgent(searchId, `Link já existente pulado: "${evalItem.title}"`, 'info');
+                  }
+                } else {
+                  await logAgent(searchId, `Ignorado link: "${evalItem.title || candidate.title}". Raciocínio: ${evalItem.explanation}`, 'info');
+                }
+              }
+              
+              await TorrentEvaluation.create({
+                searchId,
+                nyaaId: candidate.uniqueId,
+                title: candidate.title,
+                status: hasSavedAnyMatch ? 'matched' : 'ignored',
+                explanation: `Processados ${evaluatedMagnets.length} links magnet na página. ` +
+                             (hasSavedAnyMatch ? 'Encontrados links correspondentes.' : 'Nenhum link correspondente encontrado.')
               });
               
-              hasSavedAnyMatch = true;
-            } else {
-              await logAgent(searchId, `Link já existente pulado: "${evalItem.title}"`, 'info');
+              if (hasSavedAnyMatch) {
+                const isComplete = await checkSearchCompletion(searchId, search, browser, config, false);
+                if (isComplete) {
+                  searchCompleted = true;
+                  break;
+                }
+              }
+            } catch (err) {
+              await logAgent(searchId, `Erro ao processar detalhes de ${candidate.title}: ${err.message}`, 'error');
             }
-          } else {
-            await logAgent(searchId, `Ignorado link: "${evalItem.title || candidate.title}". Raciocínio: ${evalItem.explanation}`, 'info');
           }
         }
+      } else {
+        await logAgent(searchId, `Nenhum torrent encontrado na variação ${variationCount} após escanear todas as fontes selecionadas.`, 'warn');
+      }
+      
+      if (searchCompleted) {
+        break;
+      }
+      
+      const isCompleteCheck = await checkSearchCompletion(searchId, search, browser, config, false);
+      if (isCompleteCheck) {
+        searchCompleted = true;
+        break;
+      }
+      
+      variationCount++;
+      if (variationCount <= maxVariations) {
+        await logAgent(searchId, `Buscando nova variação de termos de pesquisa, pois a variação anterior não preencheu todos os requisitos de busca...`, 'info');
         
-        // Salva a avaliação da página mãe no histórico
-        await TorrentEvaluation.create({
-          searchId,
-          nyaaId: candidate.uniqueId,
-          title: candidate.title,
-          status: hasSavedAnyMatch ? 'matched' : 'ignored',
-          explanation: `Processados ${evaluatedMagnets.length} links magnet na página. ` +
-                       (hasSavedAnyMatch ? 'Encontrados links correspondentes.' : 'Nenhum link correspondente encontrado.')
-        });
+        // Busca matches existentes no banco para aplicar a estratégia de sequências/episódios
+        const currentMatches = await TorrentResult.findAll({ where: { searchId } });
+        const matchTitles = currentMatches.map(r => r.title);
         
-        // Verifica se já concluímos a busca se salvamos algum resultado novo
-        if (hasSavedAnyMatch) {
-          const isComplete = await checkSearchCompletion(searchId, search, browser, config);
-          if (isComplete) return;
+        let programmaticKeywords = [];
+        if (matchTitles.length > 0) {
+          programmaticKeywords = generateNextEpisodeKeywords(matchTitles, attemptedKeywords);
         }
         
-      } catch (err) {
-        await logAgent(searchId, `Erro ao processar detalhes de ${candidate.title}: ${err.message}`, 'error');
+        if (programmaticKeywords.length > 0) {
+          currentKeywords = programmaticKeywords.slice(0, 2);
+          await logAgent(searchId, `Estratégia de episódio/sequência detectada! Geradas palavras-chave automáticas a partir de títulos encontrados: ${currentKeywords.join(', ')}`, 'info');
+          
+          for (const kw of currentKeywords) {
+            if (!attemptedKeywords.includes(kw)) {
+              attemptedKeywords.push(kw);
+            }
+          }
+        } else {
+          // Caso não haja palavras-chave de sequências programáticas, chama o LLM normal com histórico
+          const variationPrompt = [
+            {
+              role: "system",
+              content: "Você é um assistente especialista em torrents. Seu objetivo é ajudar a encontrar o conteúdo desejado gerando variações de palavras-chave de busca eficientes e inteligentes para rastreadores de torrent."
+            },
+            {
+              role: "user",
+              content: `O usuário quer encontrar torrents que correspondam a: "${search.query}".
+              Idioma Preferido: "${config.preferredLanguage}"
+              Resolução Preferida: "${config.preferredResolution}"
+              
+              Já tentamos realizar buscas com as seguintes palavras-chave, mas elas não resultaram em resultados satisfatórios ou compatíveis:
+              ${JSON.stringify(attemptedKeywords)}
+              
+              ${matchTitles.length > 0 ? `Até agora, encontramos com sucesso os seguintes resultados correspondentes:
+              ${JSON.stringify(matchTitles)}
+              
+              Se esses resultados forem episódios individuais (ex: "E01", "Ep 1", "01"), partes ou volumes, use o padrão de título deles como base para gerar palavras-chave de busca para os outros episódios/partes ausentes (por exemplo, incrementando o número do episódio no título ou gerando variações do nome do episódio/temporada, mantendo o formato do grupo de lançamento ou do título encontrado se for relevante).` : ''}
+              
+              Gere uma nova variação com 1 ou 2 palavras-chave de busca recomendadas adicionais que aumentem as chances de encontrar o arquivo.
+              Diretrizes de Variação:
+              1. Uma das variações iniciais ou quando nada for encontrado deve ser estritamente o título limpo da obra (ex: nome do filme ou da série), sem nenhuma adição relacionada a idioma, legenda, dublagem ou resolução (ex: sem "1080p", "dublado", "legendado", "dual audio", etc.).
+              2. Se os termos anteriores eram muito específicos (ex: com temporada, episódio, ano ou tags), gere termos mais amplos (ex: apenas o nome limpo do show ou do filme).
+              3. Se os termos eram muito gerais, tente adicionar palavras-chave relevantes ou sinônimos comuns do conteúdo.
+              4. Tente variações com o título oficial do conteúdo em inglês ou no idioma original (ex: japonês para animes), ou traduções comuns.
+              5. Tente abreviações comuns ou remova caracteres especiais/pontuações que possam atrapalhar a pesquisa do indexador.
+              6. NUNCA sugira termos que já foram tentados anteriormente.
+              
+              Responda APENAS com um objeto JSON no formato exato:
+              {
+                "keywords": ["nova_palavra_chave_1", "nova_palavra_chave_2"]
+              }`
+            }
+          ];
+          
+          try {
+            if (token.stopped) throw new Error('SEARCH_STOPPED');
+            const variationResult = await callLLM(searchId, variationPrompt, true);
+            const newKeywords = (variationResult.keywords || []).filter(kw => kw && !attemptedKeywords.includes(kw));
+            
+            if (newKeywords.length === 0) {
+              await logAgent(searchId, "IA falhou em sugerir palavras-chave novas e únicas. Tentando termo original limpo e simplificado...", "warn");
+              const simplified = search.query
+                .replace(/(1080p|720p|480p|legendado|dublado|dual\s*audio|completo|temporada|season|s\d+e\d+|\d+ª\s*temporada)/gi, '')
+                .replace(/[^a-zA-Z0-9\s]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+              if (simplified && !attemptedKeywords.includes(simplified)) {
+                currentKeywords = [simplified];
+              } else {
+                await logAgent(searchId, "Não há mais variações de busca viáveis para tentar.", "warn");
+                break;
+              }
+            } else {
+              currentKeywords = newKeywords;
+            }
+            
+            for (const kw of currentKeywords) {
+              if (!attemptedKeywords.includes(kw)) {
+                attemptedKeywords.push(kw);
+              }
+            }
+            
+          } catch (err) {
+            await logAgent(searchId, `Erro ao gerar variação de palavras-chave: ${err.message}`, 'warn');
+            break;
+          }
+        }
       }
     }
     
     if (token.stopped) throw new Error('SEARCH_STOPPED');
-    await checkSearchCompletion(searchId, search, browser, config, true);
+    
+    if (!searchCompleted) {
+      await checkSearchCompletion(searchId, search, browser, config, true);
+    }
     
   } catch (err) {
     if (err.message === 'SEARCH_STOPPED' || token.stopped) {
@@ -869,7 +1044,7 @@ async function checkSearchCompletion(searchId, searchModel, browserInstance, con
   ];
   
   try {
-    const checkResult = await callLLM(completionPrompt, true);
+    const checkResult = await callLLM(searchId, completionPrompt, true);
     
     // Atualiza metadados
     searchModel.type = checkResult.type || 'unknown';
@@ -921,7 +1096,133 @@ async function checkSearchCompletion(searchId, searchModel, browserInstance, con
   }
 }
 
+// Helper para gerar palavras-chave para próximos episódios ou sequências com base nos matches já encontrados
+function generateNextEpisodeKeywords(matchedTitles, attemptedKeywords) {
+  const nextKeywords = [];
+  
+  const regexes = [
+    /(\bs\d+e)(\d+)\b/i,                                      // S01E01 -> prefix="S01E", num="01"
+    /(\bep(?:isódio|isode)?\s*|cap(?:ítulo)?\s*|e\s*)(\d+)\b/i, // Ep 01 -> prefix="Ep ", num="01"
+    /(\bpart(?:e)?\s*|vol(?:ume)?\s*)(\d+)\b/i                // Part 1, Vol 1 -> prefix="Part ", num="1"
+  ];
+  
+  for (const title of matchedTitles) {
+    for (const regex of regexes) {
+      const match = title.match(regex);
+      if (match) {
+        const prefix = match[1];
+        const numStr = match[2];
+        const num = parseInt(numStr, 10);
+        
+        if (!isNaN(num) && num > 0) {
+          // Ignora anos normais (ex: 1990-2030) para não gerar buscas por anos incrementados
+          if (num >= 1990 && num <= 2030) {
+            continue;
+          }
+          
+          // Tenta gerar os próximos 3 episódios/partes
+          for (let i = 1; i <= 3; i++) {
+            const nextNum = num + i;
+            const nextNumStr = numStr.startsWith('0') && numStr.length > 1 && nextNum < 10
+              ? '0' + nextNum 
+              : String(nextNum);
+              
+            // Substitui a numeração no título original do torrent correspondente encontrado
+            const newTitleKeyword = title.replace(match[0], prefix + nextNumStr);
+            
+            // Gera também uma versão simplificada: Nome do show + prefixo + número (ex: "Show Name S01E02")
+            const titleIndex = title.indexOf(match[0]);
+            let cleanShowName = title;
+            if (titleIndex !== -1) {
+              cleanShowName = title.substring(0, titleIndex)
+                .replace(/[\[\({].*?[\]\)}]/g, '') // remove tags e colchetes
+                .replace(/[^a-zA-Z0-9\s]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            }
+            
+            const simpleKeyword = `${cleanShowName} ${prefix}${nextNumStr}`.replace(/\s+/g, ' ').trim();
+            
+            if (simpleKeyword && !attemptedKeywords.includes(simpleKeyword) && !nextKeywords.includes(simpleKeyword)) {
+              nextKeywords.push(simpleKeyword);
+            }
+            if (newTitleKeyword && !attemptedKeywords.includes(newTitleKeyword) && !nextKeywords.includes(newTitleKeyword)) {
+              nextKeywords.push(newTitleKeyword);
+            }
+          }
+        }
+        break; // Só analisa o primeiro padrão encontrado para cada título
+      }
+    }
+  }
+  return nextKeywords;
+}
+
+// Testa a conexão com a API de IA
+async function testConnection(config) {
+  try {
+    let endpoint = '';
+    let headers = { 'Content-Type': 'application/json' };
+    let body = {};
+    
+    const messages = [{ role: 'user', content: 'respond only with "ok"' }];
+    
+    if (config.aiProvider === 'anthropic') {
+      endpoint = config.aiUrl.endsWith('/messages') 
+        ? config.aiUrl 
+        : (config.aiUrl.endsWith('/v1') ? `${config.aiUrl}/messages` : `${config.aiUrl}/v1/messages`);
+        
+      headers['x-api-key'] = config.aiToken;
+      headers['anthropic-version'] = '2023-06-01';
+      
+      body = {
+        model: config.aiModel,
+        max_tokens: 10,
+        messages: [{ role: 'user', content: 'respond only with "ok"' }]
+      };
+    } else {
+      endpoint = config.aiUrl.endsWith('/chat/completions') 
+        ? config.aiUrl 
+        : (config.aiUrl.endsWith('/v1') ? `${config.aiUrl}/chat/completions` : `${config.aiUrl}/v1/chat/completions`);
+        
+      headers['Authorization'] = `Bearer ${config.aiToken}`;
+      
+      body = {
+        model: config.aiModel,
+        messages: messages,
+        max_tokens: 10
+      };
+    }
+    
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(body)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      return {
+        success: false,
+        error: `API respondeu com erro ${response.status}: ${errorText}`
+      };
+    }
+    
+    const data = await response.json();
+    return {
+      success: true,
+      data: data
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err.message || String(err)
+    };
+  }
+}
+
 module.exports = {
   runSearchAgent,
-  stopSearchAgent
+  stopSearchAgent,
+  testConnection
 };

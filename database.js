@@ -83,6 +83,11 @@ const Search = sequelize.define('Search', {
     type: DataTypes.STRING,
     allowNull: false,
     defaultValue: 'unknown'
+  },
+  cost: {
+    type: DataTypes.FLOAT,
+    allowNull: false,
+    defaultValue: 0.0
   }
 });
 
@@ -220,6 +225,17 @@ AgentLog.belongsTo(Search, { foreignKey: 'searchId' });
 // Função para inicializar e semear o banco de dados
 async function initDatabase() {
   await sequelize.sync();
+  
+  // Garante a presença da coluna cost na tabela Searches para compatibilidade com bancos já existentes
+  try {
+    await sequelize.getQueryInterface().addColumn('Searches', 'cost', {
+      type: DataTypes.FLOAT,
+      allowNull: false,
+      defaultValue: 0.0
+    });
+  } catch (e) {
+    // A coluna já existe ou a tabela foi criada agora por sync()
+  }
   
   // Seed de Configurações do Sistema Padrão se não existirem
   const defaultSettings = [
