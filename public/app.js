@@ -91,6 +91,39 @@ const closeModalBtn = document.getElementById('closeModalBtn');
 
 const cancelModalBtn = document.getElementById('cancelModalBtn');
 
+// Variáveis de Otimização e Análise de IA
+const optimizeAllSourcesBtn = document.getElementById('optimizeAllSourcesBtn');
+const sourceAnalysisModal = document.getElementById('sourceAnalysisModal');
+const closeAnalysisModalBtn = document.getElementById('closeAnalysisModalBtn');
+const cancelAnalysisBtn = document.getElementById('cancelAnalysisBtn');
+const applyAnalysisBtn = document.getElementById('applyAnalysisBtn');
+const retryAnalysisBtn = document.getElementById('retryAnalysisBtn');
+
+const analysisLoadingState = document.getElementById('analysisLoadingState');
+const analysisResultState = document.getElementById('analysisResultState');
+const analysisErrorState = document.getElementById('analysisErrorState');
+const analysisStatusTitle = document.getElementById('analysisStatusTitle');
+const analysisLogs = document.getElementById('analysisLogs');
+
+const analysisSourceName = document.getElementById('analysisSourceName');
+const analysisSourceUrl = document.getElementById('analysisSourceUrl');
+const analysisStrategyBadge = document.getElementById('analysisStrategyBadge');
+const analysisExplanation = document.getElementById('analysisExplanation');
+const analysisPatternOld = document.getElementById('analysisPatternOld');
+const analysisPatternNew = document.getElementById('analysisPatternNew');
+const analysisDescription = document.getElementById('analysisDescription');
+const analysisContentTypes = document.getElementById('analysisContentTypes');
+const analysisErrorMsg = document.getElementById('analysisErrorMsg');
+
+// Lote
+const batchAnalysisModal = document.getElementById('batchAnalysisModal');
+const closeBatchAnalysisModalBtn = document.getElementById('closeBatchAnalysisModalBtn');
+const closeBatchBtn = document.getElementById('closeBatchBtn');
+const batchProgressText = document.getElementById('batchProgressText');
+const batchProgressBar = document.getElementById('batchProgressBar');
+const batchSitesList = document.getElementById('batchSitesList');
+const cancelBatchBtn = document.getElementById('cancelBatchBtn');
+
 
 
 // Inputs do Modal de Fonte
@@ -296,6 +329,23 @@ document.addEventListener('DOMContentLoaded', () => {
   closeModalBtn.addEventListener('click', closeSourceModal);
 
   cancelModalBtn.addEventListener('click', closeSourceModal);
+
+  // Ligações de Análise com IA
+  if (optimizeAllSourcesBtn) {
+    optimizeAllSourcesBtn.addEventListener('click', analyzeAllSources);
+  }
+  if (closeAnalysisModalBtn) {
+    closeAnalysisModalBtn.addEventListener('click', () => cancelAnalysisAndClose());
+  }
+  if (cancelAnalysisBtn) {
+    cancelAnalysisBtn.addEventListener('click', () => cancelAnalysisAndClose());
+  }
+  if (closeBatchAnalysisModalBtn) {
+    closeBatchAnalysisModalBtn.addEventListener('click', () => cancelBatchAndClose());
+  }
+  if (closeBatchBtn) {
+    closeBatchBtn.addEventListener('click', () => cancelBatchAndClose());
+  }
 
 
 
@@ -668,6 +718,10 @@ function renderSourcesTable() {
         <td class="py-4 px-6">${statusBadge}</td>
 
         <td class="py-4 px-6 text-right space-x-1.5">
+
+          <button onclick="analyzeSource(${source.id})" class="p-1.5 btn-ai-analyze rounded-lg transition-colors" title="Otimizar Busca com IA">
+            <i class="ph-bold ph-sparkle text-sm"></i>
+          </button>
 
           <button onclick="editSource(${source.id})" class="p-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-600 dark:text-slate-300 rounded-lg transition-colors" title="Editar">
 
@@ -2838,4 +2892,508 @@ async function clearDelugeErrors() {
     clearDelugeErrorsBtn.disabled = false;
     clearDelugeErrorsBtn.innerHTML = `<i class="ph-bold ph-trash"></i> Apagar Erros`;
   }
+}
+
+// --- OTIMIZADOR DE FONTES DE BUSCA COM IA ---
+
+let currentAnalysisSourceId = null;
+let currentAnalysisResult = null;
+let currentAnalysisAbortController = null;
+let analyzeEventSource = null;
+
+// Analisa um site individualmente
+async function analyzeSource(id) {
+  const source = searchSources.find(s => s.id === id);
+  if (!source) return;
+
+  currentAnalysisSourceId = id;
+  currentAnalysisResult = null;
+
+  // Mostra modal, reseta states
+  sourceAnalysisModal.classList.remove('hidden');
+  analysisLoadingState.classList.remove('hidden');
+  analysisResultState.classList.add('hidden');
+  analysisErrorState.classList.add('hidden');
+  applyAnalysisBtn.classList.add('hidden');
+  retryAnalysisBtn.classList.add('hidden');
+
+  // Logs iniciais
+  analysisStatusTitle.innerText = "Iniciando análise...";
+  analysisLogs.innerHTML = "";
+  
+  const addLog = (msg) => {
+    const time = new Date().toLocaleTimeString();
+    analysisLogs.innerHTML += `<div>[${time}] ${msg}</div>`;
+    analysisLogs.scrollTop = analysisLogs.scrollHeight;
+  };
+
+  addLog(`Conectando ao canal de log em tempo real...`);
+  
+  // Conecta ao stream SSE de logs de análise
+  if (analyzeEventSource) analyzeEventSource.close();
+  analyzeEventSource = new EventSource('/api/sources/analyze/stream');
+  
+  analyzeEventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.sourceId === id) {
+        analysisStatusTitle.innerText = data.message;
+        addLog(data.message);
+      }
+    } catch (err) {
+      console.error("Erro ao ler log de análise:", err);
+    }
+  };
+
+  analyzeEventSource.onerror = () => {
+    // Silencioso se estiver fechando ou reconectando
+  };
+
+  try {
+    if (currentAnalysisAbortController) currentAnalysisAbortController.abort();
+    currentAnalysisAbortController = new AbortController();
+
+    const res = await fetch(`/api/sources/${id}/analyze`, { 
+      method: 'POST',
+      signal: currentAnalysisAbortController.signal
+    });
+    
+    if (analyzeEventSource) {
+      analyzeEventSource.close();
+      analyzeEventSource = null;
+    }
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || "Erro desconhecido na análise");
+    }
+
+    const result = await res.json();
+    if (!result.success || !result.analysis) {
+      throw new Error(result.error || "A IA não conseguiu determinar a estratégia do site.");
+    }
+
+    currentAnalysisResult = result.analysis;
+    showAnalysisResult(source, result.analysis);
+  } catch (err) {
+    if (analyzeEventSource) {
+      analyzeEventSource.close();
+      analyzeEventSource = null;
+    }
+    if (err.name === 'AbortError') {
+      addLog("Análise cancelada pelo usuário.");
+      return;
+    }
+    showAnalysisError(err.message);
+  } finally {
+    currentAnalysisAbortController = null;
+  }
+}
+
+function showAnalysisResult(source, analysis) {
+  analysisLoadingState.classList.add('hidden');
+  analysisErrorState.classList.add('hidden');
+  analysisResultState.classList.remove('hidden');
+  applyAnalysisBtn.classList.remove('hidden');
+  retryAnalysisBtn.classList.add('hidden');
+
+  analysisSourceName.innerText = source.name;
+  analysisSourceUrl.innerText = source.url;
+
+  // Tradução do StrategyType
+  const strategyLabels = {
+    'query_url': 'URL com Query de Busca',
+    'api_route': 'Rota de API / AJAX',
+    'input_selector': 'Digitação em Seletor',
+    'unknown': 'Desconhecida'
+  };
+  analysisStrategyBadge.innerText = strategyLabels[analysis.strategyType] || analysis.strategyType;
+
+  analysisExplanation.innerText = analysis.explanation;
+  analysisPatternOld.innerText = source.searchUrlPattern || '(Nenhum)';
+  analysisPatternNew.innerText = analysis.detectedPattern;
+  
+  // Se o padrão recomendado for diferente, destaca
+  if (source.searchUrlPattern !== analysis.detectedPattern) {
+    analysisPatternNew.className = "p-2.5 bg-indigo-500/10 border border-indigo-500/40 rounded-xl text-xs font-mono text-indigo-600 dark:text-indigo-400 break-all font-bold";
+  } else {
+    analysisPatternNew.className = "p-2.5 bg-slate-100 dark:bg-slate-800/45 rounded-xl text-xs font-mono text-slate-500 dark:text-slate-400 break-all";
+  }
+
+  analysisDescription.value = analysis.optimizedDescription || '';
+
+  // Renderiza tipos de conteúdo recomendados
+  const contentTypesHtml = (analysis.contentTypes || []).map(t => {
+    let label = t;
+    let color = 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
+    if (t === 'series') { label = 'Séries'; color = 'bg-blue-500/10 border border-blue-500/20 text-blue-600 dark:text-blue-400'; }
+    if (t === 'movies') { label = 'Filmes'; color = 'bg-indigo-500/10 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400'; }
+    if (t === 'book') { label = 'Livros'; color = 'bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400'; }
+    if (t === 'music') { label = 'Músicas'; color = 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400'; }
+    return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${color}">${label}</span>`;
+  }).join(' ');
+
+  analysisContentTypes.innerHTML = contentTypesHtml || '<span class="text-slate-500 text-[10px]">Nenhum sugerido</span>';
+
+  // Configura botão de aplicar
+  applyAnalysisBtn.onclick = () => applyAnalysisResult(currentAnalysisSourceId, analysis);
+}
+
+function showAnalysisError(msg) {
+  analysisLoadingState.classList.add('hidden');
+  analysisResultState.classList.add('hidden');
+  analysisErrorState.classList.remove('hidden');
+  applyAnalysisBtn.classList.add('hidden');
+  retryAnalysisBtn.classList.remove('hidden');
+
+  analysisErrorMsg.innerText = msg;
+  retryAnalysisBtn.onclick = () => analyzeSource(currentAnalysisSourceId);
+}
+
+// Aplica o resultado da análise salvando no DB
+async function applyAnalysisResult(id, analysis) {
+  const source = searchSources.find(s => s.id === id);
+  if (!source) return;
+
+  const originalBtnHtml = applyAnalysisBtn.innerHTML;
+  applyAnalysisBtn.disabled = true;
+  applyAnalysisBtn.innerText = "Salvando...";
+
+  try {
+    const res = await fetch(`/api/sources/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: source.name,
+        url: source.url,
+        searchUrlPattern: analysis.detectedPattern,
+        description: analysisDescription.value.trim(),
+        contentTypes: analysis.contentTypes,
+        isActive: source.isActive
+      })
+    });
+
+    if (!res.ok) throw new Error("Erro ao salvar otimizações no servidor.");
+
+    showDelugeToast("Fonte de busca otimizada com sucesso!", "success");
+    sourceAnalysisModal.classList.add('hidden');
+    await fetchSources(); // Recarrega tabela
+  } catch (err) {
+    showDelugeToast(err.message, "error");
+  } finally {
+    applyAnalysisBtn.disabled = false;
+    applyAnalysisBtn.innerHTML = originalBtnHtml;
+  }
+}
+
+// Cancela análise atual e fecha modal
+async function cancelAnalysisAndClose() {
+  if (currentAnalysisSourceId) {
+    if (currentAnalysisAbortController) {
+      currentAnalysisAbortController.abort();
+    }
+    // Notifica backend para parar Puppeteer
+    fetch(`/api/sources/${currentAnalysisSourceId}/analyze/cancel`, { method: 'POST' }).catch(() => {});
+  }
+  
+  if (analyzeEventSource) {
+    analyzeEventSource.close();
+    analyzeEventSource = null;
+  }
+  
+  sourceAnalysisModal.classList.add('hidden');
+  currentAnalysisSourceId = null;
+  currentAnalysisAbortController = null;
+}
+
+// Otimiza todas as fontes ativas sequencialmente
+let batchEventSource = null;
+let isBatchCancelled = false;
+
+async function analyzeAllSources() {
+  const activeSources = searchSources.filter(s => s.isActive);
+  if (activeSources.length === 0) {
+    showDelugeToast("Nenhum site ativo cadastrado para otimizar.", "warning");
+    return;
+  }
+
+  isBatchCancelled = false;
+  batchAnalysisModal.classList.remove('hidden');
+  batchProgressText.innerText = `0 / ${activeSources.length} Sites`;
+  batchProgressBar.style.width = '0%';
+  
+  // Configura botões do footer
+  cancelBatchBtn.classList.remove('hidden');
+  closeBatchBtn.classList.add('hidden');
+
+  // Popula lista de sites
+  batchSitesList.innerHTML = activeSources.map(source => `
+    <div id="batch-row-${source.id}" class="p-3.5 flex flex-col gap-2 text-xs transition-colors duration-150 border-b border-slate-100 dark:border-slate-800/80">
+      <div class="flex items-center justify-between">
+        <div>
+          <span class="font-bold text-slate-700 dark:text-slate-350">${source.name}</span>
+          <p class="text-[10px] text-slate-400 font-mono mt-0.5 break-all max-w-sm">${source.url}</p>
+        </div>
+        <div class="flex items-center gap-1.5" id="batch-status-${source.id}">
+          <i class="ph-bold ph-circle text-[8px] text-slate-300 dark:text-slate-700"></i>
+          <span class="text-[10px] text-slate-450 dark:text-slate-500 font-bold">Aguardando...</span>
+        </div>
+      </div>
+      <!-- Caixa de logs em tempo real -->
+      <div id="batch-log-${source.id}" class="hidden w-full bg-slate-50 dark:bg-slate-950 border border-slate-200/50 dark:border-slate-800 rounded-lg p-2 font-mono text-[9px] text-slate-550 dark:text-slate-400 max-h-24 overflow-y-auto mt-1">
+      </div>
+      <!-- Caixa de comparação do diff final -->
+      <div id="batch-diff-${source.id}" class="hidden w-full p-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200/50 dark:border-slate-800 rounded-lg text-[10px] space-y-1.5 mt-1.5">
+      </div>
+    </div>
+  `).join('');
+
+  // Conecta ao SSE de logs globais
+  if (batchEventSource) batchEventSource.close();
+  batchEventSource = new EventSource('/api/sources/analyze/stream');
+  
+  batchEventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      const logBox = document.getElementById(`batch-log-${data.sourceId}`);
+      if (logBox) {
+        logBox.classList.remove('hidden');
+        const time = new Date().toLocaleTimeString();
+        logBox.innerHTML += `<div>[${time}] ${data.message}</div>`;
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+    } catch (err) {
+      console.error("Erro no streaming de logs em lote:", err);
+    }
+  };
+
+  let completed = 0;
+
+  // Lógica do botão de cancelar lote
+  cancelBatchBtn.onclick = async () => {
+    isBatchCancelled = true;
+    
+    // Se houver uma análise rodando, cancela ela
+    if (activeSources[completed]) {
+      const runningSource = activeSources[completed];
+      if (currentAnalysisAbortController) {
+        currentAnalysisAbortController.abort();
+      }
+      fetch(`/api/sources/${runningSource.id}/analyze/cancel`, { method: 'POST' }).catch(() => {});
+    }
+
+    if (batchEventSource) {
+      batchEventSource.close();
+      batchEventSource = null;
+    }
+
+    showDelugeToast("Análise em lote cancelada pelo usuário.", "warning");
+
+    // Preenche status de cancelado nos restantes
+    for (let i = completed; i < activeSources.length; i++) {
+      const s = activeSources[i];
+      const statusEl = document.getElementById(`batch-status-${s.id}`);
+      const rowEl = document.getElementById(`batch-row-${s.id}`);
+      if (statusEl && rowEl) {
+        rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-slate-500/5 dark:bg-slate-800/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
+        statusEl.innerHTML = `
+          <span class="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 font-bold mr-1.5">Cancelado</span>
+          <i class="ph-bold ph-x-circle text-lg text-slate-400"></i>
+        `;
+      }
+    }
+
+    cancelBatchBtn.classList.add('hidden');
+    closeBatchBtn.classList.remove('hidden');
+  };
+
+  for (const source of activeSources) {
+    if (isBatchCancelled) break;
+
+    const statusContainer = document.getElementById(`batch-status-${source.id}`);
+    const rowEl = document.getElementById(`batch-row-${source.id}`);
+    const logBox = document.getElementById(`batch-log-${source.id}`);
+    
+    rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-indigo-500/5 dark:bg-indigo-950/10 border-b border-slate-200 dark:border-slate-800 transition-colors duration-150";
+    statusContainer.innerHTML = `
+      <i class="ph-bold ph-circle-notch animate-spin text-indigo-500"></i>
+      <span class="text-[10px] text-indigo-500 font-bold">Analisando...</span>
+    `;
+    if (logBox) logBox.classList.remove('hidden');
+
+    try {
+      if (currentAnalysisAbortController) currentAnalysisAbortController.abort();
+      currentAnalysisAbortController = new AbortController();
+
+      currentAnalysisSourceId = source.id;
+      const res = await fetch(`/api/sources/${source.id}/analyze`, { 
+        method: 'POST',
+        signal: currentAnalysisAbortController.signal
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Erro de resposta do servidor");
+      }
+
+      const result = await res.json();
+      if (!result.success || !result.analysis) {
+        if (result.isConnectionError) {
+          rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-amber-500/5 dark:bg-amber-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
+          statusContainer.innerHTML = `
+            <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-400 font-bold mr-1.5" title="${result.error}">Inacessível</span>
+            <i class="ph-bold ph-warning-circle text-lg text-amber-500" title="${result.error}"></i>
+          `;
+          if (logBox) logBox.classList.add('hidden');
+          completed++;
+          batchProgressText.innerText = `${completed} / ${activeSources.length} Sites`;
+          batchProgressBar.style.width = `${(completed / activeSources.length) * 100}%`;
+          continue;
+        }
+        throw new Error(result.error || "A IA falhou em analisar.");
+      }
+
+      const analysis = result.analysis;
+      
+      // Oculta log box se terminou com sucesso para limpar layout e focar no diff
+      if (logBox) logBox.classList.add('hidden');
+      
+      const hasPatternDiff = source.searchUrlPattern !== analysis.detectedPattern;
+      const hasDescriptionDiff = source.description !== analysis.optimizedDescription;
+      
+      // Auto-aplica as otimizações
+      const updateRes = await fetch(`/api/sources/${source.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: source.name,
+          url: source.url,
+          searchUrlPattern: analysis.detectedPattern,
+          description: analysis.optimizedDescription || source.description,
+          contentTypes: analysis.contentTypes || source.contentTypes,
+          isActive: source.isActive
+        })
+      });
+
+      if (!updateRes.ok) throw new Error("Erro ao salvar atualizações");
+
+      // Sucesso! Atualiza UI da linha com comparativo de diferenças
+      rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-emerald-500/5 dark:bg-emerald-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
+      
+      if (hasPatternDiff || hasDescriptionDiff) {
+        statusContainer.innerHTML = `
+          <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 font-bold mr-1.5">Otimizado</span>
+          <i class="ph-bold ph-check-circle text-lg text-emerald-500"></i>
+        `;
+      } else {
+        statusContainer.innerHTML = `
+          <span class="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 font-bold mr-1.5">Sem Alterações</span>
+          <i class="ph-bold ph-check-circle text-lg text-slate-400"></i>
+        `;
+      }
+
+      // Preenche caixa de comparação
+      const diffBox = document.getElementById(`batch-diff-${source.id}`);
+      if (diffBox) {
+        diffBox.classList.remove('hidden');
+        
+        let patternHtml = '';
+        if (hasPatternDiff) {
+          patternHtml = `
+            <div>
+              <span class="font-bold text-slate-450 dark:text-slate-400">Padrão URL:</span> 
+              <span class="line-through text-red-500 dark:text-red-400/70 font-mono">${source.searchUrlPattern || '(Nenhum)'}</span> 
+              <i class="ph-bold ph-arrow-right mx-1 text-slate-400"></i>
+              <span class="text-emerald-600 dark:text-emerald-400 font-mono font-bold">${analysis.detectedPattern}</span>
+            </div>
+          `;
+        } else {
+          patternHtml = `
+            <div>
+              <span class="font-bold text-slate-450 dark:text-slate-400">Padrão URL:</span> 
+              <span class="text-slate-500 dark:text-slate-400 font-mono">${source.searchUrlPattern || '(Sem Alterações)'}</span>
+            </div>
+          `;
+        }
+
+        let descHtml = '';
+        if (hasDescriptionDiff) {
+          descHtml = `
+            <div>
+              <span class="font-bold text-slate-450 dark:text-slate-400">Descrição:</span> 
+              <span class="line-through text-red-500 dark:text-red-400/70">${source.description || '(Nenhuma)'}</span> 
+              <i class="ph-bold ph-arrow-right mx-1 text-slate-400"></i>
+              <span class="text-emerald-600 dark:text-emerald-400 font-medium">${analysis.optimizedDescription}</span>
+            </div>
+          `;
+        } else {
+          descHtml = `
+            <div>
+              <span class="font-bold text-slate-450 dark:text-slate-400">Descrição:</span> 
+              <span class="text-slate-500 dark:text-slate-400">${source.description || '(Sem Alterações)'}</span>
+            </div>
+          `;
+        }
+
+        diffBox.innerHTML = `
+          <div class="space-y-1 mt-1 font-sans">
+            ${patternHtml}
+            ${descHtml}
+            <div class="text-[9px] text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-900/50 p-2 rounded-lg mt-1 border border-slate-200/40 dark:border-slate-800/40 leading-relaxed">
+              <strong>Lógica da IA:</strong> ${analysis.explanation}
+            </div>
+          </div>
+        `;
+      }
+
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        if (logBox) logBox.classList.add('hidden');
+        break; // Interrompe fila
+      }
+
+      rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-red-500/5 dark:bg-red-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
+      statusContainer.innerHTML = `
+        <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-500/10 border border-red-500/20 text-red-500 font-bold mr-1.5" title="${err.message}">Falhou</span>
+        <i class="ph-bold ph-warning-circle text-lg text-red-500" title="${err.message}"></i>
+      `;
+      
+      // Exibe erro na caixa de logs
+      if (logBox) {
+        logBox.classList.remove('hidden');
+        logBox.innerHTML += `<div class="text-red-555 dark:text-red-400 font-bold">Erro: ${err.message}</div>`;
+      }
+    }
+
+    completed++;
+    batchProgressText.innerText = `${completed} / ${activeSources.length} Sites`;
+    batchProgressBar.style.width = `${(completed / activeSources.length) * 100}%`;
+  }
+
+  // Finaliza lote
+  if (batchEventSource) {
+    batchEventSource.close();
+    batchEventSource = null;
+  }
+  
+  currentAnalysisSourceId = null;
+  currentAnalysisAbortController = null;
+
+  cancelBatchBtn.classList.add('hidden');
+  closeBatchBtn.classList.remove('hidden');
+}
+
+// Cancela o lote e fecha modal
+async function cancelBatchAndClose() {
+  isBatchCancelled = true;
+  if (currentAnalysisSourceId && currentAnalysisAbortController) {
+    currentAnalysisAbortController.abort();
+    fetch(`/api/sources/${currentAnalysisSourceId}/analyze/cancel`, { method: 'POST' }).catch(() => {});
+  }
+  if (batchEventSource) {
+    batchEventSource.close();
+    batchEventSource = null;
+  }
+  batchAnalysisModal.classList.add('hidden');
+  await fetchSources();
 }

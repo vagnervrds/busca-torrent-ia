@@ -501,6 +501,9 @@
                 <button id="exportSourcesBtn" class="py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-lg text-xs flex items-center gap-1 border border-slate-200/50 dark:border-slate-700/50 transition-all">
                   <i class="ph-bold ph-download-simple"></i> Exportar
                 </button>
+                <button id="optimizeAllSourcesBtn" class="py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 transition-all" title="Analisar a melhor estratégia de busca para todos os sites ativos">
+                  <i class="ph-bold ph-sparkle"></i> Analisar Todos (IA)
+                </button>
                 <button id="addSourceBtn" class="py-2 px-3 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg text-xs flex items-center gap-1 transition-all">
                   <i class="ph-bold ph-plus-circle"></i> Cadastrar Site
                 </button>
@@ -644,6 +647,158 @@
     </div>
   </div>
 
+  <!-- MODAL DE ANÁLISE DE SITE COM IA -->
+  <div id="sourceAnalysisModal" class="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center hidden p-4 font-sans">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-lg rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-scaleIn">
+      <!-- Modal Header -->
+      <div class="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/30 dark:bg-slate-950/25">
+        <h3 id="analysisModalTitle" class="font-bold text-sm text-slate-850 dark:text-slate-100 flex items-center gap-2">
+          <i class="ph-bold ph-sparkle text-indigo-500"></i> Analisar Estratégia com IA
+        </h3>
+        <button id="closeAnalysisModalBtn" class="text-slate-400 hover:text-slate-200 text-lg">
+          <i class="ph-bold ph-x"></i>
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-6 overflow-y-auto space-y-4 flex-1">
+        <!-- LOADING STATE -->
+        <div id="analysisLoadingState" class="flex flex-col items-center justify-center py-8 space-y-4">
+          <div class="relative w-16 h-16 flex items-center justify-center">
+            <div class="absolute inset-0 rounded-full border-4 border-indigo-500/20 animate-ping"></div>
+            <div class="w-12 h-12 rounded-full border-4 border-indigo-500 border-t-transparent animate-spin"></div>
+          </div>
+          <div class="text-center">
+            <h4 class="font-bold text-xs text-slate-800 dark:text-slate-200" id="analysisStatusTitle">Acessando o site...</h4>
+            <p class="text-[10px] text-slate-400 mt-1">O agente de IA está mapeando os formulários e rotas de busca do site.</p>
+          </div>
+          <!-- Log Box style -->
+          <div class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800/80 rounded-xl p-3 font-mono text-[10px] text-slate-550 dark:text-slate-455 h-32 overflow-y-auto" id="analysisLogs">
+            <!-- logs go here -->
+          </div>
+        </div>
+
+        <!-- RESULT STATE -->
+        <div id="analysisResultState" class="hidden space-y-4">
+          <!-- Strategy badge & Name -->
+          <div class="flex items-center justify-between border-b border-slate-100 dark:border-slate-800/80 pb-3">
+            <div>
+              <span id="analysisSourceName" class="font-bold text-slate-800 dark:text-slate-100 text-sm">Site</span>
+              <p class="text-[10px] text-slate-400 font-mono" id="analysisSourceUrl">https://site.com</p>
+            </div>
+            <span id="analysisStrategyBadge" class="px-2.5 py-1 text-[10px] font-bold rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+              Query URL
+            </span>
+          </div>
+
+          <!-- Explanation -->
+          <div class="space-y-1">
+            <span class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Descoberta / Lógica</span>
+            <div class="p-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800/80 rounded-xl text-xs text-slate-700 dark:text-slate-300 leading-relaxed font-medium" id="analysisExplanation">
+              Explicação detalhada...
+            </div>
+          </div>
+
+          <!-- Pattern Comparison -->
+          <div class="grid grid-cols-1 gap-2.5">
+            <div class="space-y-1">
+              <span class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Padrão de URL Atual</span>
+              <div class="p-2.5 bg-slate-100 dark:bg-slate-800/40 rounded-xl text-xs font-mono text-slate-500 dark:text-slate-400 break-all" id="analysisPatternOld">
+                -
+              </div>
+            </div>
+            <div class="space-y-1">
+              <span class="block text-[10px] font-bold text-indigo-500 dark:text-indigo-400 uppercase tracking-wider">Padrão de URL Recomendado</span>
+              <div class="p-2.5 bg-indigo-500/5 dark:bg-indigo-950/20 border border-indigo-500/25 rounded-xl text-xs font-mono text-indigo-600 dark:text-indigo-400 break-all font-semibold" id="analysisPatternNew">
+                -
+              </div>
+            </div>
+          </div>
+
+          <!-- Description -->
+          <div class="space-y-1">
+            <span class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Descrição Otimizada (IA)</span>
+            <textarea id="analysisDescription" rows="2" class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium resize-none"></textarea>
+          </div>
+
+          <!-- Content Types -->
+          <div class="space-y-2">
+            <span class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Tipos de Conteúdo Sugeridos</span>
+            <div class="flex flex-wrap gap-2 text-xs" id="analysisContentTypes">
+              <!-- badges checkboxes or text badges -->
+            </div>
+          </div>
+        </div>
+
+        <!-- ERROR STATE -->
+        <div id="analysisErrorState" class="hidden flex flex-col items-center justify-center py-8 space-y-4">
+          <i class="ph-bold ph-warning-circle text-4xl text-red-500"></i>
+          <div class="text-center">
+            <h4 class="font-bold text-xs text-slate-800 dark:text-slate-200">Falha ao analisar o site</h4>
+            <p class="text-[10px] text-red-400 mt-1 max-w-xs mx-auto font-semibold" id="analysisErrorMsg">Erro indefinido.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="p-6 border-t border-slate-100 dark:border-slate-800/80 flex justify-end gap-3 bg-slate-50/20 dark:bg-slate-950/10">
+        <button type="button" id="cancelAnalysisBtn" class="py-2 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors">
+          Cancelar
+        </button>
+        <button type="button" id="applyAnalysisBtn" class="hidden py-2 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs shadow-md transition-all">
+          Aplicar Otimização
+        </button>
+        <button type="button" id="retryAnalysisBtn" class="hidden py-2 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs shadow-md transition-all">
+          Tentar Novamente
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE OTIMIZAÇÃO EM LOTE COM IA -->
+  <div id="batchAnalysisModal" class="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center hidden p-4 font-sans">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-scaleIn">
+      <!-- Modal Header -->
+      <div class="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/30 dark:bg-slate-950/25">
+        <h3 class="font-bold text-sm text-slate-850 dark:text-slate-100 flex items-center gap-2">
+          <i class="ph-bold ph-sparkle text-indigo-500 animate-pulse"></i> Otimização em Lote de Fontes (IA)
+        </h3>
+        <button id="closeBatchAnalysisModalBtn" class="text-slate-400 hover:text-slate-200 text-lg">
+          <i class="ph-bold ph-x"></i>
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-6 overflow-y-auto space-y-4 flex-1">
+        <!-- Progress bar -->
+        <div class="space-y-1">
+          <div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase">
+            <span>Progresso Geral</span>
+            <span id="batchProgressText">0 / 0 Sites</span>
+          </div>
+          <div class="w-full bg-slate-100 dark:bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-200/50 dark:border-slate-800">
+            <div id="batchProgressBar" class="bg-indigo-600 h-full w-0 transition-all duration-300"></div>
+          </div>
+        </div>
+
+        <!-- Sites List -->
+        <div class="border border-slate-200 dark:border-slate-800/80 rounded-xl overflow-hidden divide-y divide-slate-100 dark:divide-slate-800/80 max-h-[50vh] overflow-y-auto" id="batchSitesList">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="p-6 border-t border-slate-100 dark:border-slate-800/80 flex justify-end gap-3 bg-slate-50/20 dark:bg-slate-950/10">
+        <button type="button" id="cancelBatchBtn" class="py-2 px-4 bg-red-100 hover:bg-red-202 dark:bg-red-950/30 dark:hover:bg-red-900/40 text-red-700 dark:text-red-400 font-semibold rounded-xl text-xs transition-colors">
+          Cancelar Análise
+        </button>
+        <button type="button" id="closeBatchBtn" class="py-2 px-4 bg-slate-100 hover:bg-slate-202 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-705 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors">
+          Fechar
+        </button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

@@ -9,6 +9,11 @@ puppeteer.use(StealthPlugin());
 // Mapa para controle de buscas ativas em memória (cancelamento imediato)
 const activeSearches = new Map(); // searchId -> { token: { stopped: false }, browser: Browser }
 
+// Eventos e controle para otimizador de fontes de busca
+const EventEmitter = require('events');
+const analysisEvents = new EventEmitter();
+const activeOptimizations = new Map(); // sourceId -> { browser: Browser, aborted: boolean }
+
 // Fila para gerenciar a execução sequencial de buscas e economizar recursos do servidor
 const searchQueue = []; // Array of { searchId, resumeMode }
 let isProcessingQueue = false;
@@ -90,6 +95,63 @@ async function ensureNoBrowserLeaks() {
   }
 }
 
+// Prepara a página para simular um navegador humano real e evitar bloqueios
+async function preparePageForHumanLikeBehavior(page) {
+  // Viewport realista
+  await page.setViewport({ width: 1920, height: 1080 });
+
+  // User-Agent moderno e comum
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+  // Cabeçalhos HTTP padrão de navegador real
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"'
+  });
+
+  // Oculta assinaturas comuns do Puppeteer
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined
+    });
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['pt-BR', 'pt', 'en-US', 'en']
+    });
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' },
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' }
+      ]
+    });
+  });
+}
+
+// Simula pequenas interações físicas para parecer mais humano
+async function simulateHumanInteraction(page) {
+  try {
+    await page.mouse.move(100, 100);
+    await page.mouse.move(300, 200, { steps: 5 });
+    
+    await page.evaluate(() => {
+      window.scrollBy(0, 150);
+    });
+    await new Promise(r => setTimeout(r, 250));
+    await page.evaluate(() => {
+      window.scrollBy(0, -150);
+    });
+  } catch (e) {
+    // Ignora erros na simulação
+  }
+}
+
 // Lanca o browser com retry (até 3 tentativas) e timeout estendido para hardware limitado
 // Remove --single-process que é a causa direta do erro de WS timeout no Linux
 async function launchBrowserWithRetry(searchId) {
@@ -161,7 +223,8 @@ async function launchBrowserWithRetry(searchId) {
 
 // Helper para logs com SSE
 async function logAgent(searchId, message, level = 'info') {
-  console.log(`[Busca #${searchId}] [${level.toUpperCase()}] ${message}`);
+  console.log(`[Busca #${searchId || 'SISTEMA'}] [${level.toUpperCase()}] ${message}`);
+  if (!searchId) return;
   const log = await AgentLog.create({ searchId, message, level });
   
   if (global.sseBroadcast) {
@@ -324,7 +387,7 @@ async function callLLM(searchId, messages, jsonMode = false) {
       }
       
       const callCost = calculateCost(config.aiModel, promptTokens, completionTokens);
-      if (callCost > 0) {
+      if (searchId && callCost > 0) {
         const searchRecord = await Search.findByPk(searchId);
         if (searchRecord) {
           searchRecord.cost = (searchRecord.cost || 0.0) + callCost;
@@ -598,30 +661,21 @@ async function runSearchAgent(searchId, resumeMode = true) {
     if (active) active.browser = browser;
     
     const page = await browser.newPage();
-    await page.setViewport({ width: 1366, height: 768 });
     
-    // Intercepta e aborta requisições inúteis (imagens, fontes, css, mídias) para poupar CPU/RAM/Banda
+    // Configura disfarce humano na página
+    await preparePageForHumanLikeBehavior(page);
+    
+    // Intercepta e aborta imagens e mídias para economizar banda, mas mantem css/fontes/scripts ativos
+    // para evitar bloqueios de detecção de bots
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
-      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+      if (['image', 'media'].includes(resourceType)) {
         req.abort();
       } else {
         req.continue();
       }
     });
-
-    await page.setJavaScriptEnabled(false); // Evita execução de scripts pesados/anúncios/mineradores
-    
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      'sec-ch-ua': '"Chromium";v="120", "Not=A?Brand";v="24", "Google Chrome";v="120"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"'
-    });
-    
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
     let searchCompleted = false;
     let variationCount = 1;
@@ -651,7 +705,23 @@ async function runSearchAgent(searchId, resumeMode = true) {
           const searchUrl = source.searchUrlPattern.replace('{query}', encodeURIComponent(keyword));
           
           try {
-            await page.goto(searchUrl, { waitUntil: 'load', timeout: 15000 });
+            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+            await new Promise(r => setTimeout(r, 1500));
+            
+            // Simulação de comportamento humano
+            await simulateHumanInteraction(page);
+            
+            // Detecção ativa de Cloudflare
+            const pageTitle = await page.title();
+            if (pageTitle.includes('Cloudflare') || pageTitle.includes('Just a moment') || pageTitle.includes('Attention Required')) {
+              await logAgent(searchId, `[Cloudflare] Desafio de segurança detectado em ${source.name}. Aguardando desafio automático por 8s...`, 'warn');
+              await new Promise(r => setTimeout(r, 8000));
+              const pageTitleRetry = await page.title();
+              if (pageTitleRetry.includes('Cloudflare') || pageTitleRetry.includes('Just a moment')) {
+                throw new Error("Acesso bloqueado pela proteção contra bots do Cloudflare.");
+              }
+              await logAgent(searchId, `[Cloudflare] Desafio de segurança superado com sucesso em ${source.name}!`, 'info');
+            }
             
             let scraped = [];
             
@@ -873,7 +943,22 @@ async function runSearchAgent(searchId, resumeMode = true) {
                   }
                 }
                 
-                await page.goto(targetUrl, { waitUntil: 'load', timeout: 15000 });
+                await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+                await new Promise(r => setTimeout(r, 1500));
+                
+                // Simulação de comportamento humano
+                await simulateHumanInteraction(page);
+                
+                // Detecção ativa de Cloudflare
+                const pageTitle = await page.title();
+                if (pageTitle.includes('Cloudflare') || pageTitle.includes('Just a moment') || pageTitle.includes('Attention Required')) {
+                  await logAgent(searchId, `[Cloudflare] Desafio detectado na página de detalhes de ${candidate.title}. Aguardando desafio automático por 8s...`, 'warn');
+                  await new Promise(r => setTimeout(r, 8000));
+                  const pageTitleRetry = await page.title();
+                  if (pageTitleRetry.includes('Cloudflare') || pageTitleRetry.includes('Just a moment')) {
+                    throw new Error("Bloqueado pelo Cloudflare na página de detalhes.");
+                  }
+                }
                 
                 detailData = await page.evaluate(() => {
                   const descEl = document.getElementById('torrent-description') || document.querySelector('.description') || document.querySelector('.panel-body') || document.querySelector('#description') || document.querySelector('.conteudo') || document.querySelector('.post-content');
@@ -1425,8 +1510,319 @@ async function testConnection(config) {
   }
 }
 
+// Analisa a melhor estratégia de busca de um site
+async function analyzeSearchSource(sourceId) {
+  const source = await SearchSource.findByPk(sourceId);
+  if (!source) {
+    throw new Error(`Fonte de busca #${sourceId} não encontrada.`);
+  }
+
+  // Cancela análise anterior se houver
+  if (activeOptimizations.has(sourceId)) {
+    const prev = activeOptimizations.get(sourceId);
+    prev.aborted = true;
+    if (prev.browser) {
+      try { await prev.browser.close(); } catch (e) {}
+    }
+  }
+
+  const optState = { browser: null, aborted: false };
+  activeOptimizations.set(sourceId, optState);
+
+  const log = (msg) => {
+    console.log(`[Otimizador de Site] [${source.name}] ${msg}`);
+    analysisEvents.emit('log', { sourceId, message: msg });
+  };
+
+  const checkAborted = () => {
+    if (optState.aborted) {
+      throw new Error("Análise cancelada pelo usuário.");
+    }
+  };
+
+  let browser = null;
+  try {
+    log(`Iniciando análise do site: ${source.name} (${source.url})`);
+    
+    log("Abrindo navegador Chrome/Puppeteer isolado...");
+    checkAborted();
+    browser = await launchBrowserWithRetry(null);
+    optState.browser = browser;
+    checkAborted();
+
+    const page = await browser.newPage();
+    
+    // Configura disfarce humano na página
+    await preparePageForHumanLikeBehavior(page);
+    
+    log(`Navegando até a URL base: ${source.url}...`);
+    checkAborted();
+    
+    // Usa domcontentloaded para evitar timeouts com scripts de rastreamento pesados/lentos
+    await page.goto(source.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    checkAborted();
+    
+    log("Aguardando carregamento inicial e hidratação da página...");
+    await new Promise(r => setTimeout(r, 2000));
+    checkAborted();
+
+    log("Simulando comportamento humano (movimentos de mouse e scroll)...");
+    await simulateHumanInteraction(page);
+    checkAborted();
+
+    // Detecção ativa de Cloudflare
+    const pageTitle = await page.title();
+    if (pageTitle.includes('Cloudflare') || pageTitle.includes('Just a moment') || pageTitle.includes('Attention Required')) {
+      log("Alerta: Desafio/CAPTCHA do Cloudflare detectado! Aguardando 8 segundos para resolução automática...");
+      await new Promise(r => setTimeout(r, 8000));
+      checkAborted();
+      const pageTitleRetry = await page.title();
+      if (pageTitleRetry.includes('Cloudflare') || pageTitleRetry.includes('Just a moment')) {
+        throw new Error("Acesso bloqueado pela proteção contra bots do Cloudflare (desafio automático falhou).");
+      }
+      log("Sucesso: Desafio de segurança do Cloudflare superado!");
+    }
+
+    log("Acessado com sucesso. Avaliando estrutura da página (DOM)...");
+    
+    // Avalia a estrutura da página
+    const pageData = await page.evaluate(() => {
+      const title = document.title;
+      
+      // Mapeia os formulários presentes
+      const forms = Array.from(document.querySelectorAll('form')).map(form => {
+        const action = form.getAttribute('action') || '';
+        const method = (form.getAttribute('method') || 'get').toLowerCase();
+        const inputs = Array.from(form.querySelectorAll('input, select, textarea')).map(input => {
+          return {
+            name: input.getAttribute('name') || '',
+            type: input.getAttribute('type') || input.tagName.toLowerCase(),
+            placeholder: input.getAttribute('placeholder') || ''
+          };
+        });
+        return { action, method, inputs };
+      });
+
+      // Mapeia inputs de busca fora de formulários
+      const searchInputs = Array.from(document.querySelectorAll('input')).filter(input => {
+        const name = (input.getAttribute('name') || '').toLowerCase();
+        const id = (input.getAttribute('id') || '').toLowerCase();
+        const placeholder = (input.getAttribute('placeholder') || '').toLowerCase();
+        const type = (input.getAttribute('type') || '').toLowerCase();
+        return name.includes('search') || name.includes('query') || name.includes('q') || 
+               id.includes('search') || placeholder.includes('buscar') || placeholder.includes('search') ||
+               type === 'search';
+      }).map(input => ({
+        name: input.getAttribute('name') || '',
+        type: input.getAttribute('type') || 'input',
+        placeholder: input.getAttribute('placeholder') || '',
+        id: input.getAttribute('id') || ''
+      }));
+
+      // Pega alguns links relevantes para tentar achar padrões de URLs de busca
+      const links = Array.from(document.querySelectorAll('a'))
+        .map(a => ({
+          text: a.innerText.trim(),
+          href: a.getAttribute('href') || ''
+        }))
+        .filter(link => {
+          const href = link.href.toLowerCase();
+          return href.includes('search') || href.includes('query') || href.includes('q=') || href.includes('search=') || href.includes('api/');
+        })
+        .slice(0, 20);
+
+      return { title, forms, searchInputs, links };
+    });
+
+    log(`Título da página localizado: "${pageData.title}"`);
+    log(`Encontrados ${pageData.forms.length} formulários e ${pageData.searchInputs.length} inputs de busca.`);
+
+    // --- Simulação de Busca Ativa ---
+    log("Procurando campo de busca (input) na página para simulação...");
+    const searchSelector = await page.evaluate(() => {
+      const candidates = [
+        'input[type="search"]',
+        'input[name="q"]',
+        'input[name="query"]',
+        'input[name="search"]',
+        'input[name="searchTerm"]',
+        'input[name="search_query"]',
+        'input[placeholder*="search" i]',
+        'input[placeholder*="buscar" i]',
+        'input[id*="search" i]',
+        'input[class*="search" i]'
+      ];
+      for (const selector of candidates) {
+        try {
+          const el = document.querySelector(selector);
+          if (el && el.tagName === 'INPUT') {
+            return selector;
+          }
+        } catch (e) {}
+      }
+      const inputs = Array.from(document.querySelectorAll('input'));
+      for (const input of inputs) {
+        const type = (input.getAttribute('type') || 'text').toLowerCase();
+        if (['text', 'search'].includes(type)) {
+          const id = input.id ? `#${input.id}` : '';
+          const name = input.name ? `[name="${input.name}"]` : '';
+          if (id || name) return `input${id}${name}`;
+        }
+      }
+      return null;
+    });
+
+    let activeSearchDiscovery = null;
+    let capturedRequestUrl = null;
+
+    if (searchSelector) {
+      log(`Campo de busca localizado: ${searchSelector}`);
+      
+      // Habilita listener para requisições AJAX durante a busca
+      page.on('request', request => {
+        const url = request.url();
+        if (url.includes('testquery123') && !url.endsWith('.png') && !url.endsWith('.jpg') && !url.endsWith('.css') && !url.endsWith('.js')) {
+          capturedRequestUrl = url;
+          log(`Capturado padrão de busca via chamada AJAX: ${url}`);
+        }
+      });
+
+      log("Inserindo o termo de teste 'testquery123'...");
+      checkAborted();
+      await page.focus(searchSelector);
+      
+      // Limpa o campo de busca
+      await page.keyboard.down('Control');
+      await page.keyboard.press('A');
+      await page.keyboard.up('Control');
+      await page.keyboard.press('Backspace');
+      
+      await page.type(searchSelector, 'testquery123');
+      checkAborted();
+      
+      log("Pressionando ENTER para submeter a busca...");
+      await page.keyboard.press('Enter');
+      
+      log("Aguardando redirecionamento ou chamadas AJAX...");
+      try {
+        await page.waitForNavigation({ timeout: 6000 }).catch(() => {});
+      } catch (e) {}
+      
+      checkAborted();
+      const finalUrl = page.url();
+      log(`URL da página após busca: ${finalUrl}`);
+      
+      if (finalUrl && finalUrl.includes('testquery123')) {
+        activeSearchDiscovery = finalUrl.replace('testquery123', '{query}');
+        log(`Padrão de URL de busca encontrado via redirecionamento: ${activeSearchDiscovery}`);
+      } else if (capturedRequestUrl) {
+        activeSearchDiscovery = capturedRequestUrl.replace('testquery123', '{query}');
+        log(`Padrão de busca AJAX/API capturado: ${activeSearchDiscovery}`);
+      } else {
+        log("Nenhum padrão dinâmico imediato pôde ser deduzido pela simulação.");
+      }
+    } else {
+      log("Nenhum campo de entrada de texto para busca pôde ser identificado.");
+    }
+
+    log("Fechando navegador de análise...");
+    await browser.close();
+    browser = null;
+    optState.browser = null;
+
+    log("Enviando dados estruturais coletados ao cérebro da IA...");
+    checkAborted();
+
+    // Constrói prompt para a IA definir a melhor estratégia
+    const parsePrompt = [
+      {
+        role: "system",
+        content: "Você é um especialista em análise de arquitetura web de sites de torrent, crawlers e engenharia de busca."
+      },
+      {
+        role: "user",
+        content: `Estamos analisando o site "${source.name}" com URL base "${source.url}".
+A estratégia/padrão de busca atual é: "${source.searchUrlPattern}".
+
+Acessamos a página inicial e coletamos as seguintes informações sobre a estrutura da página:
+${JSON.stringify(pageData, null, 2)}
+
+${activeSearchDiscovery ? `Durante a simulação de busca digitando 'testquery123' no campo de busca, detectamos que o site gerou/redirecionou para a seguinte URL ou rota de API: "${activeSearchDiscovery}". Utilize essa informação como altíssima prioridade para determinar o "detectedPattern"!` : ''}
+
+Analise se existe uma estratégia melhor para realizar pesquisas automatizadas de torrent neste site.
+Considere:
+1. Se há um formulário de busca com método GET (geralmente gerando um padrão de URL como https://domain.com/search?q={query}).
+2. Se o padrão atual já está correto ou se há um melhor/mais limpo.
+3. Se há alguma indicação de API de busca.
+4. Se o site requer navegação complexa (ex: SPA).
+
+Responda em formato JSON, com as seguintes chaves:
+- "success": true/false (se a análise foi bem-sucedida)
+- "strategyType": "query_url" ou "api_route" ou "input_selector" ou "unknown"
+- "detectedPattern": o padrão de URL de busca ideal contendo "{query}" (ex: "https://site.com/search?q={query}"). Se for para manter a atual, retorne ela mesma. Garanta que seja uma URL válida e completa (incluindo o domínio se for relativo).
+- "explanation": breve explicação em Português sobre o que foi encontrado e a lógica da recomendação.
+- "optimizedDescription": descrição do site em Português resumida (máximo 150 caracteres), focando em que tipo de conteúdo ele suporta, ajudando a IA principal a decidir quando usá-lo.
+- "contentTypes": array contendo os tipos de conteúdo recomendados baseados no site e análise (ex: ["movies", "series", "book", "music", "other"])
+
+Responda APENAS com o objeto JSON válido, sem qualquer bloco de código markdown ou texto extra.`
+      }
+    ];
+
+    const parseResult = await callLLM(null, parsePrompt, true);
+    log(`Análise de IA concluída com sucesso! Nova estratégia proposta: ${parseResult.detectedPattern}`);
+    
+    return {
+      success: true,
+      analysis: parseResult
+    };
+
+  } catch (err) {
+    log(`Falha na análise: ${err.message}`);
+    if (browser) {
+      try { await browser.close(); } catch(e) {}
+    }
+    
+    let errorMsg = err.message || String(err);
+    let isConnectionError = false;
+    if (errorMsg.includes('timeout') || errorMsg.includes('Navigation') || errorMsg.includes('net::ERR')) {
+      errorMsg = 'Tempo limite de conexão esgotado (Timeout). O site pode estar offline, bloqueado pelo provedor ou sob proteção do Cloudflare.';
+      isConnectionError = true;
+    }
+    
+    return {
+      success: false,
+      isConnectionError: isConnectionError,
+      error: errorMsg
+    };
+  } finally {
+    activeOptimizations.delete(sourceId);
+  }
+}
+
+// Cancela a análise em andamento de uma fonte
+async function cancelSearchSourceAnalysis(sourceId) {
+  const optState = activeOptimizations.get(sourceId);
+  if (optState) {
+    optState.aborted = true;
+    if (optState.browser) {
+      try {
+        await optState.browser.close();
+      } catch (err) {
+        // Ignora erros ao fechar
+      }
+    }
+    activeOptimizations.delete(sourceId);
+    console.log(`[Otimizador de Site] Análise da fonte #${sourceId} cancelada com sucesso.`);
+    return { success: true };
+  }
+  return { success: false, error: "Nenhuma análise ativa para esta fonte." };
+}
+
 module.exports = {
   enqueueSearch,
   stopSearchAgent,
-  testConnection
+  testConnection,
+  analyzeSearchSource,
+  cancelSearchSourceAnalysis,
+  analysisEvents
 };

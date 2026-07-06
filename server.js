@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry } = require('./database');
-const { enqueueSearch, stopSearchAgent, testConnection } = require('./agent');
+const { enqueueSearch, stopSearchAgent, testConnection, analyzeSearchSource, cancelSearchSourceAnalysis, analysisEvents } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
 
@@ -287,6 +287,65 @@ app.delete('/api/sources/:id', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Analisar estratégia de busca com IA
+app.post('/api/sources/:id/analyze', async (req, res) => {
+  const sourceId = Number(req.params.id);
+  
+  // Cancela análise se o cliente desconectar (ex: cancelou fetch no frontend)
+  const onClose = () => {
+    cancelSearchSourceAnalysis(sourceId).catch(() => {});
+  };
+  req.on('close', onClose);
+
+  try {
+    const result = await analyzeSearchSource(sourceId);
+    req.off('close', onClose);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error, isConnectionError: result.isConnectionError });
+    }
+    res.json(result);
+  } catch (err) {
+    req.off('close', onClose);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cancelar análise de estratégia de busca
+app.post('/api/sources/:id/analyze/cancel', async (req, res) => {
+  try {
+    const sourceId = Number(req.params.id);
+    const result = await cancelSearchSourceAnalysis(sourceId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Rota SSE para streaming de logs de análise em tempo real
+app.get('/api/sources/analyze/stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
+  });
+  res.write('\n');
+  
+  const onLog = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  
+  analysisEvents.on('log', onLog);
+  
+  const pingInterval = setInterval(() => {
+    res.write(': ping\n\n');
+  }, 15000);
+  
+  req.on('close', () => {
+    clearInterval(pingInterval);
+    analysisEvents.off('log', onLog);
+  });
 });
 
 // Importar fontes de busca em lote
