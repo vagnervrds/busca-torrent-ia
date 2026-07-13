@@ -565,7 +565,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
       await logAgent(searchId, "Modo de Retomada ativo. Carregando histórico para pular torrents já avaliados.", "info");
     }
     
-    // Passo 1: IA decide quais fontes de busca utilizar
+    // Passo 1: IA classifica a query e seleciona as fontes de busca
     const activeSources = await SearchSource.findAll({ where: { isActive: true } });
     if (activeSources.length === 0) {
       await logAgent(searchId, "Nenhuma fonte de busca ativa encontrada no banco de dados. Crie ou ative pelo menos uma fonte.", "error");
@@ -574,44 +574,53 @@ async function runSearchAgent(searchId, resumeMode = true) {
       return;
     }
     
-    await logAgent(searchId, "IA analisando quais fontes de busca fazem sentido para a consulta...", "info");
-    const sourceDetails = activeSources.map(s => ({
-      id: s.id,
-      name: s.name,
-      description: s.description,
-      contentTypes: JSON.parse(s.contentTypes)
-    }));
-    
-    const selectSourcesPrompt = [
+    await logAgent(searchId, "IA analisando a categoria do conteúdo para a busca...", "info");
+    const classifyPrompt = [
       {
         role: "system",
-        content: "Você é um roteador inteligente. Sua função é analisar a consulta do usuário e selecionar quais das fontes de busca cadastradas são adequadas para responder a essa consulta."
+        content: "Você é um classificador inteligente de conteúdo. Classifique a consulta do usuário em uma das seguintes categorias de mídia: 'series', 'movies', 'anime', 'book', 'music', 'software', 'games' ou 'other'."
       },
       {
         role: "user",
         content: `Consulta do Usuário: "${search.query}"
         
-        Fontes de Busca Disponíveis:
-        ${JSON.stringify(sourceDetails, null, 2)}
-        
-        Selecione apenas as fontes que fazem sentido pesquisar. Por exemplo, se a consulta for sobre animes ou mangás, selecione fontes adequadas (como Nyaa.si). Se for sobre livros gerais, escolha fontes que indexem livros.
-        Retorne uma lista JSON dos IDs das fontes selecionadas.
-        
         Responda APENAS com um objeto JSON no formato exato:
         {
-          "selectedIds": [1, 2]
+          "category": "series" | "movies" | "anime" | "book" | "music" | "software" | "games" | "other"
         }`
       }
     ];
-    
-    if (token.stopped) throw new Error('SEARCH_STOPPED');
-    const sourceSelectionResult = await callLLM(searchId, selectSourcesPrompt, true);
-    const selectedSourceIds = sourceSelectionResult.selectedIds || [];
-    const selectedSources = activeSources.filter(s => selectedSourceIds.includes(s.id));
-    
+
+    let queryCategory = 'other';
+    try {
+      if (token.stopped) throw new Error('SEARCH_STOPPED');
+      const classResult = await callLLM(searchId, classifyPrompt, true);
+      queryCategory = classResult.category || 'other';
+      await logAgent(searchId, `Categoria identificada para a busca: "${queryCategory}"`, 'info');
+    } catch (err) {
+      await logAgent(searchId, `Erro ao classificar busca, usando categoria padrão 'other': ${err.message}`, 'warn');
+    }
+
+    // Filtra as fontes que suportam a categoria ou são genéricas
+    let selectedSources = activeSources.filter(s => {
+      try {
+        const types = JSON.parse(s.contentTypes);
+        if (!types || types.length === 0) return true;
+        if (queryCategory === 'anime') {
+          return types.includes('anime') || types.includes('series') || types.includes('movies');
+        }
+        if (queryCategory === 'series' || queryCategory === 'movies') {
+          return types.includes('series') || types.includes('movies') || types.includes('anime');
+        }
+        return types.includes(queryCategory) || types.includes('other');
+      } catch (e) {
+        return true;
+      }
+    });
+
     if (selectedSources.length === 0) {
-      await logAgent(searchId, "A IA determinou que nenhuma das fontes ativas é relevante para esta busca. Usando a primeira fonte ativa por padrão.", "warn");
-      selectedSources.push(activeSources[0]);
+      await logAgent(searchId, "Nenhuma fonte correspondente restrita encontrada. Buscando em todas as fontes ativas.", "warn");
+      selectedSources = activeSources;
     }
     
     await logAgent(searchId, `Fontes de busca ativadas: ${selectedSources.map(s => s.name).join(', ')}`, 'info');
@@ -693,30 +702,53 @@ async function runSearchAgent(searchId, resumeMode = true) {
       // Lista para acumular torrents candidatos coletados nesta variação
       let allScrapedTorrents = [];
       
-      // Loop pelas fontes e palavras-chave atuais
+      // Cria a lista de tarefas de raspagem (fonte + palavra-chave)
+      const scrapeTasks = [];
       for (const source of selectedSources) {
-        const isNyaa = source.name.toLowerCase().includes('nyaa') || source.url.includes('nyaa.si');
-        
         for (const keyword of currentKeywords) {
-          if (token.stopped) throw new Error('SEARCH_STOPPED');
-          await logAgent(searchId, `Pesquisando no site "${source.name}" por: "${keyword}"...`, 'info');
-          
-          // Substitui {query} no padrão da URL de busca
-          const searchUrl = source.searchUrlPattern.replace('{query}', encodeURIComponent(keyword));
+          scrapeTasks.push({ source, keyword });
+        }
+      }
+      
+      // Executa as tarefas concorrentemente em lotes paralelos (limite de 3 abas por vez)
+      const concurrencyLimit = 3;
+      for (let i = 0; i < scrapeTasks.length; i += concurrencyLimit) {
+        if (token.stopped) throw new Error('SEARCH_STOPPED');
+        const batch = scrapeTasks.slice(i, i + concurrencyLimit);
+        
+        const batchPromises = batch.map(async (task) => {
+          if (token.stopped) return;
+          const { source, keyword } = task;
+          const isNyaa = source.name.toLowerCase().includes('nyaa') || source.url.includes('nyaa.si');
+          const tempPage = await browser.newPage();
           
           try {
-            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+            await preparePageForHumanLikeBehavior(tempPage);
+            await tempPage.setRequestInterception(true);
+            tempPage.on('request', (req) => {
+              const resourceType = req.resourceType();
+              if (['image', 'media'].includes(resourceType)) {
+                req.abort();
+              } else {
+                req.continue();
+              }
+            });
+
+            await logAgent(searchId, `Pesquisando no site "${source.name}" por: "${keyword}"...`, 'info');
+            const searchUrl = source.searchUrlPattern.replace('{query}', encodeURIComponent(keyword));
+            
+            await tempPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
             await new Promise(r => setTimeout(r, 1500));
             
             // Simulação de comportamento humano
-            await simulateHumanInteraction(page);
+            await simulateHumanInteraction(tempPage);
             
             // Detecção ativa de Cloudflare
-            const pageTitle = await page.title();
+            const pageTitle = await tempPage.title();
             if (pageTitle.includes('Cloudflare') || pageTitle.includes('Just a moment') || pageTitle.includes('Attention Required')) {
               await logAgent(searchId, `[Cloudflare] Desafio de segurança detectado em ${source.name}. Aguardando desafio automático por 8s...`, 'warn');
               await new Promise(r => setTimeout(r, 8000));
-              const pageTitleRetry = await page.title();
+              const pageTitleRetry = await tempPage.title();
               if (pageTitleRetry.includes('Cloudflare') || pageTitleRetry.includes('Just a moment')) {
                 throw new Error("Acesso bloqueado pela proteção contra bots do Cloudflare.");
               }
@@ -727,55 +759,99 @@ async function runSearchAgent(searchId, resumeMode = true) {
             
             if (isNyaa) {
               // Parser Otimizado de Nyaa.si
-              const hasResults = await page.evaluate(() => !!document.querySelector('table.torrent-list'));
-              if (!hasResults) {
+              const hasResults = await tempPage.evaluate(() => !!document.querySelector('table.torrent-list'));
+              if (hasResults) {
+                scraped = await tempPage.evaluate((sName) => {
+                  const rows = Array.from(document.querySelectorAll('table.torrent-list tbody tr'));
+                  return rows.map(tr => {
+                    const nameLink = tr.querySelector('td:nth-child(2) a:not([class*="comments"])');
+                    const magnetLink = tr.querySelector('td:nth-child(3) a[href^="magnet:"]');
+                    const sizeTd = tr.querySelector('td:nth-child(4)');
+                    const seedsTd = tr.querySelector('td:nth-child(6)');
+                    const leechesTd = tr.querySelector('td:nth-child(7)');
+                    
+                    return {
+                      title: nameLink ? nameLink.innerText.trim() : '',
+                      pageUrl: nameLink ? nameLink.href : '',
+                      magnetLink: magnetLink ? magnetLink.getAttribute('href') : '',
+                      size: sizeTd ? sizeTd.innerText.trim() : '',
+                      seeders: seedsTd ? parseInt(seedsTd.innerText.trim(), 10) || 0 : 0,
+                      leechers: leechesTd ? parseInt(leechesTd.innerText.trim(), 10) || 0 : 0,
+                      sourceName: sName
+                    };
+                  }).filter(r => r.title && r.magnetLink);
+                }, source.name);
+              } else {
                 await logAgent(searchId, `Nenhum resultado encontrado para "${keyword}" em ${source.name}.`, 'warn');
-                continue;
               }
-              
-              scraped = await page.evaluate((sName) => {
-                const rows = Array.from(document.querySelectorAll('table.torrent-list tbody tr'));
-                return rows.map(tr => {
-                  const nameLink = tr.querySelector('td:nth-child(2) a:not([class*="comments"])');
-                  const magnetLink = tr.querySelector('td:nth-child(3) a[href^="magnet:"]');
-                  const sizeTd = tr.querySelector('td:nth-child(4)');
-                  const dateTd = tr.querySelector('td:nth-child(5)');
-                  const seedsTd = tr.querySelector('td:nth-child(6)');
-                  const leechesTd = tr.querySelector('td:nth-child(7)');
-                  
-                  return {
-                    title: nameLink ? nameLink.innerText.trim() : '',
-                    pageUrl: nameLink ? nameLink.href : '',
-                    magnetLink: magnetLink ? magnetLink.getAttribute('href') : '',
-                    size: sizeTd ? sizeTd.innerText.trim() : '',
-                    seeders: seedsTd ? parseInt(seedsTd.innerText.trim(), 10) || 0 : 0,
-                    leechers: leechesTd ? parseInt(leechesTd.innerText.trim(), 10) || 0 : 0,
-                    sourceName: sName
-                  };
-                }).filter(r => r.title && r.magnetLink);
-              }, source.name);
             } else {
               // RASPAGEM GENÉRICA VIA IA PARA OUTROS SITES
               await logAgent(searchId, `Iniciando raspagem adaptativa em ${source.name}...`, 'info');
               
-              // Extrai todos os links do DOM da página e algum contexto de texto
-              const rawElements = await page.evaluate(() => {
-                const anchors = Array.from(document.querySelectorAll('a'));
+              // Extrai todos os links relevantes filtrando boilerplates e ruído
+              const rawElements = await tempPage.evaluate(() => {
+                const mainContainers = [
+                  'main', 'article', '#content', '#main', '.content', '.main',
+                  '.posts', '.results', '.post-list', '.torrents', '.torrent-list',
+                  '#posts-container', '#resultados', '.busca-resultados', '#search-results'
+                ];
+                
+                let container = null;
+                for (const selector of mainContainers) {
+                  const found = document.querySelector(selector);
+                  if (found) {
+                    container = found;
+                    break;
+                  }
+                }
+                
+                const root = container || document.body;
+                const anchors = Array.from(root.querySelectorAll('a'));
+                
+                const ignoredPatterns = [
+                  /facebook\.com/i, /twitter\.com/i, /instagram\.com/i, /whatsapp\.com/i,
+                  /telegram\./i, /youtube\.com/i, /pinterest\.com/i, /linkedin\.com/i,
+                  /\/category\//i, /\/tag\//i, /\/page\//i, /\/author\//i, /\/genero\//i,
+                  /\/categoria\//i, /javascript:/i, /^#$/, /wp-login/i, /login/i,
+                  /register/i, /signup/i, /entrar/i, /cadastrar/i, /privacidade/i,
+                  /termos/i, /contato/i, /dmca/i, /sobre/i, /faq/i, /rss/i
+                ];
+
+                const ignoredTexts = [
+                  'home', 'início', 'contato', 'sobre', 'privacy policy', 'termos de uso',
+                  'dmca', 'filmes', 'séries', 'animes', 'desenhos', 'pedidos', 'politica de privacidade',
+                  'política de privacidade', 'como baixar', 'parceiros', 'painel', 'sair', 'entrar',
+                  'next', 'prev', 'anterior', 'próxima', 'próximo', 'seguinte', 'mais'
+                ];
+
                 return anchors.map((a, idx) => {
                   const text = a.innerText.trim();
                   const href = a.getAttribute('href') || '';
-                  const parentText = a.parentElement ? a.parentElement.innerText.substring(0, 150).replace(/\s+/g, ' ').trim() : '';
+                  const parentText = a.parentElement ? a.parentElement.innerText.substring(0, 180).replace(/\s+/g, ' ').trim() : '';
                   return { index: idx, text, href, parentText };
                 }).filter(item => {
-                  const isRelevantText = item.text.length > 2;
-                  const isTorrentLink = item.href.includes('.torrent') || item.href.startsWith('magnet:') || item.href.includes('/torrent/') || item.href.includes('/view/') || item.href.includes('/download/');
-                  return isRelevantText || isTorrentLink;
-                }).slice(0, 80);
+                  if (!item.href || item.text.length <= 2) return false;
+                  
+                  const hrefLower = item.href.toLowerCase();
+                  if (ignoredPatterns.some(pat => pat.test(hrefLower))) return false;
+                  
+                  const textLower = item.text.toLowerCase();
+                  if (ignoredTexts.includes(textLower)) return false;
+                  
+                  const isTorrentLink = item.href.includes('.torrent') || 
+                                       item.href.startsWith('magnet:') || 
+                                       item.href.includes('/torrent/') || 
+                                       item.href.includes('/view/') || 
+                                       item.href.includes('/download/');
+                  
+                  const isInternal = item.href.startsWith('/') || item.href.includes(window.location.hostname);
+                  return isTorrentLink || isInternal;
+                }).slice(0, 100);
               });
               
               if (rawElements.length === 0) {
-                await logAgent(searchId, `Nenhum link detectado na página de busca de ${source.name}.`, 'warn');
-                continue;
+                await logAgent(searchId, `Nenhum link útil detectado na página de busca de ${source.name}.`, 'warn');
+                return;
               }
               
               // Pergunta ao LLM quais desses links são resultados de torrent válidos
@@ -809,6 +885,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
               ];
               
               try {
+                if (token.stopped) return;
                 const parseResult = await callLLM(searchId, parsePrompt, true);
                 const candidates = parseResult.candidates || [];
                 
@@ -822,7 +899,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
                   sourceName: source.name
                 }));
               } catch (err) {
-                await logAgent(searchId, `Falha na raspagem genérica por IA: ${err.message}`, 'warn');
+                await logAgent(searchId, `Falha na raspagem genérica por IA em ${source.name}: ${err.message}`, 'warn');
               }
             }
             
@@ -830,9 +907,13 @@ async function runSearchAgent(searchId, resumeMode = true) {
             allScrapedTorrents = allScrapedTorrents.concat(scraped);
             
           } catch (err) {
-            await logAgent(searchId, `Erro ao navegar ou raspar ${source.name}: ${err.message}`, 'warn');
+            await logAgent(searchId, `Erro ao navegar ou raspar ${source.name} para "${keyword}": ${err.message}`, 'warn');
+          } finally {
+            await tempPage.close().catch(() => {});
           }
-        }
+        });
+        
+        await Promise.all(batchPromises);
       }
       
       // Remove duplicados pelo magnetLink ou pela URL da página (se magnet for nulo)
@@ -1511,10 +1592,18 @@ async function testConnection(config) {
 }
 
 // Analisa a melhor estratégia de busca de um site
-async function analyzeSearchSource(sourceId) {
-  const source = await SearchSource.findByPk(sourceId);
-  if (!source) {
-    throw new Error(`Fonte de busca #${sourceId} não encontrada.`);
+async function analyzeSearchSource(sourceOrId) {
+  let source;
+  let sourceId;
+  if (sourceOrId && typeof sourceOrId === 'object') {
+    source = sourceOrId;
+    sourceId = source.id !== undefined ? source.id : -1;
+  } else {
+    sourceId = Number(sourceOrId);
+    source = await SearchSource.findByPk(sourceId);
+    if (!source) {
+      throw new Error(`Fonte de busca #${sourceId} não encontrada.`);
+    }
   }
 
   // Cancela análise anterior se houver
@@ -1758,6 +1847,7 @@ Considere:
 
 Responda em formato JSON, com as seguintes chaves:
 - "success": true/false (se a análise foi bem-sucedida)
+- "siteName": nome amigável/limpo do site (ex: "Nyaa.si" ou "The Pirate Bay"), caso não consiga identificar use o domínio.
 - "strategyType": "query_url" ou "api_route" ou "input_selector" ou "unknown"
 - "detectedPattern": o padrão de URL de busca ideal contendo "{query}" (ex: "https://site.com/search?q={query}"). Se for para manter a atual, retorne ela mesma. Garanta que seja uma URL válida e completa (incluindo o domínio se for relativo).
 - "explanation": breve explicação em Português sobre o que foi encontrado e a lógica da recomendação.
@@ -1768,18 +1858,91 @@ Responda APENAS com o objeto JSON válido, sem qualquer bloco de código markdow
       }
     ];
 
-    const parseResult = await callLLM(null, parsePrompt, true);
-    log(`Análise de IA concluída com sucesso! Nova estratégia proposta: ${parseResult.detectedPattern}`);
+    // Normalização defensiva para as chaves do JSON da IA (suporta traduções ou variações)
+    const getVal = (obj, keys) => {
+      if (!obj || typeof obj !== 'object') return undefined;
+      for (const k of keys) {
+        if (obj[k] !== undefined) return obj[k];
+      }
+      return undefined;
+    };
+
+    let parseResult = null;
+    let normalized = null;
+    let isValid = false;
+    let attempts = 0;
+    const maxLLMAttempts = 3;
+
+    while (!isValid && attempts < maxLLMAttempts) {
+      attempts++;
+      checkAborted();
+      
+      try {
+        log(`Consultando a IA para estruturação dos dados (tentativa ${attempts}/${maxLLMAttempts})...`);
+        parseResult = await callLLM(null, parsePrompt, true);
+        
+        normalized = {
+          success: getVal(parseResult, ['success', 'sucesso']) ?? true,
+          strategyType: getVal(parseResult, ['strategyType', 'strategy_type', 'tipoEstrategia', 'tipo_estrategia']) || 'unknown',
+          detectedPattern: getVal(parseResult, ['detectedPattern', 'detected_pattern', 'padraoDetectado', 'padrao_detectado', 'detectedpattern']) || "",
+          explanation: getVal(parseResult, ['explanation', 'explanation_text', 'explicacao', 'justificativa', 'explanationText']) || "",
+          optimizedDescription: getVal(parseResult, ['optimizedDescription', 'optimized_description', 'descricaoOtimizada', 'descricao_otimizada', 'descricao']) || "",
+          contentTypes: getVal(parseResult, ['contentTypes', 'content_types', 'tiposConteudo', 'tipos_conteudo', 'content_type']) || [],
+          siteName: getVal(parseResult, ['siteName', 'site_name', 'nomeSite', 'nome_site', 'sitename', 'name']) || ""
+        };
+
+        // Validação: o padrão detectado deve conter a tag obrigatória {query} ou estar vazio caso não consiga mapear
+        if (normalized.detectedPattern === "" || normalized.detectedPattern.includes('{query}')) {
+          isValid = true;
+        } else {
+          log(`Aviso: O padrão retornado pela IA ("${normalized.detectedPattern}") não contém a tag obrigatória {query}.`);
+          if (attempts < maxLLMAttempts) {
+            log("Retentando geração corrigida...");
+          }
+        }
+      } catch (llmErr) {
+        log(`Erro na chamada da IA (tentativa ${attempts}/${maxLLMAttempts}): ${llmErr.message}`);
+        if (attempts >= maxLLMAttempts) throw llmErr;
+      }
+    }
+
+    if (!isValid || !normalized) {
+      throw new Error("A IA falhou em retornar um padrão de busca válido contendo a tag {query}.");
+    }
+    
+    log(`Análise de IA concluída com sucesso! Nova estratégia proposta: ${normalized.detectedPattern}`);
+    
+    if (normalized.strategyType === 'unknown') {
+      log(`Nenhum método de busca encontrado (estratégia 'unknown'). Desativando o site automaticamente.`);
+      source.isActive = false;
+      if (typeof source.save === 'function') {
+        await source.save();
+      }
+      normalized.isActive = false;
+    } else {
+      normalized.isActive = source.isActive;
+    }
     
     return {
       success: true,
-      analysis: parseResult
+      analysis: normalized
     };
 
   } catch (err) {
     log(`Falha na análise: ${err.message}`);
     if (browser) {
       try { await browser.close(); } catch(e) {}
+    }
+    
+    // Desativa o site em caso de falha crítica de conexão / análise
+    try {
+      log(`Desativando o site "${source.name}" automaticamente devido à impossibilidade de realizar buscas.`);
+      source.isActive = false;
+      if (typeof source.save === 'function') {
+        await source.save();
+      }
+    } catch (saveErr) {
+      log(`Erro ao desativar site no banco: ${saveErr.message}`);
     }
     
     let errorMsg = err.message || String(err);

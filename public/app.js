@@ -91,6 +91,8 @@ const closeModalBtn = document.getElementById('closeModalBtn');
 
 const cancelModalBtn = document.getElementById('cancelModalBtn');
 
+const optimizeSingleUrlBtn = document.getElementById('optimizeSingleUrlBtn');
+
 // Variáveis de Otimização e Análise de IA
 const optimizeAllSourcesBtn = document.getElementById('optimizeAllSourcesBtn');
 const sourceAnalysisModal = document.getElementById('sourceAnalysisModal');
@@ -329,6 +331,19 @@ document.addEventListener('DOMContentLoaded', () => {
   closeModalBtn.addEventListener('click', closeSourceModal);
 
   cancelModalBtn.addEventListener('click', closeSourceModal);
+
+  if (optimizeSingleUrlBtn) {
+    optimizeSingleUrlBtn.addEventListener('click', () => {
+      const url = sourceUrlInput.value.trim();
+      const name = sourceNameInput.value.trim();
+      if (!url) {
+        showDelugeToast("Por favor, preencha a URL Base antes de otimizar.", "warning");
+        sourceUrlInput.focus();
+        return;
+      }
+      analyzeSourceUrl(url, name);
+    });
+  }
 
   // Ligações de Análise com IA
   if (optimizeAllSourcesBtn) {
@@ -681,13 +696,9 @@ function renderSourcesTable() {
 
 
 
-    // Badge Ativo/Inativo
-
     const statusBadge = source.isActive
-
-      ? `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/10 text-emerald-600 border border-emerald-500/20"><i class="ph-fill ph-circle text-[6px] mr-1 inline-block"></i>Ativo</span>`
-
-      : `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-500/10 text-slate-500 border border-slate-500/20">Inativo</span>`;
+      ? `<span class="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 whitespace-nowrap"><i class="ph-fill ph-circle text-[6px] mr-1"></i>Ativo</span>`
+      : `<span class="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-500/10 text-slate-500 border border-slate-500/20 whitespace-nowrap"><i class="ph-fill ph-circle text-[6px] mr-1 text-slate-400"></i>Inativo</span>`;
 
 
 
@@ -721,6 +732,10 @@ function renderSourcesTable() {
 
           <button onclick="analyzeSource(${source.id})" class="p-1.5 btn-ai-analyze rounded-lg transition-colors" title="Otimizar Busca com IA">
             <i class="ph-bold ph-sparkle text-sm"></i>
+          </button>
+
+          <button onclick="toggleSourceActive(${source.id})" class="p-1.5 ${source.isActive ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'} rounded-lg transition-colors" title="${source.isActive ? 'Desativar Site' : 'Ativar Site'}">
+            <i class="ph-bold ${source.isActive ? 'ph-toggle-right' : 'ph-toggle-left'} text-sm"></i>
           </button>
 
           <button onclick="editSource(${source.id})" class="p-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-600 dark:text-slate-300 rounded-lg transition-colors" title="Editar">
@@ -910,6 +925,33 @@ async function handleSourceSubmit(e) {
 }
 
 
+
+// Ativa ou desativa uma fonte de busca diretamente
+async function toggleSourceActive(id) {
+  const source = searchSources.find(s => s.id === id);
+  if (!source) return;
+
+  const newStatus = !source.isActive;
+
+  try {
+    const res = await fetch(`/api/sources/${id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        isActive: newStatus
+      })
+    });
+
+    if (!res.ok) throw new Error("Erro ao atualizar status da fonte");
+
+    await fetchSources();
+    showDelugeToast(`Site "${source.name}" ${newStatus ? 'ativado' : 'desativado'} com sucesso!`, "success");
+  } catch (err) {
+    alert("Erro: " + err.message);
+  }
+}
 
 // Exclui uma fonte de busca
 
@@ -2901,6 +2943,99 @@ let currentAnalysisResult = null;
 let currentAnalysisAbortController = null;
 let analyzeEventSource = null;
 
+// Analisa uma URL temporária (não cadastrada)
+async function analyzeSourceUrl(url, name = '') {
+  currentAnalysisSourceId = -1; // ID especial para novos temporários
+  currentAnalysisResult = null;
+
+  // Mostra modal, reseta states
+  sourceAnalysisModal.classList.remove('hidden');
+  analysisLoadingState.classList.remove('hidden');
+  analysisResultState.classList.add('hidden');
+  analysisErrorState.classList.add('hidden');
+  applyAnalysisBtn.classList.add('hidden');
+  retryAnalysisBtn.classList.add('hidden');
+
+  // Logs iniciais
+  analysisStatusTitle.innerText = "Iniciando análise...";
+  analysisLogs.innerHTML = "";
+  
+  const addLog = (msg) => {
+    const time = new Date().toLocaleTimeString();
+    analysisLogs.innerHTML += `<div>[${time}] ${msg}</div>`;
+    analysisLogs.scrollTop = analysisLogs.scrollHeight;
+  };
+
+  addLog(`Conectando ao canal de log em tempo real...`);
+  
+  // Conecta ao stream SSE de logs de análise
+  if (analyzeEventSource) analyzeEventSource.close();
+  analyzeEventSource = new EventSource('/api/sources/analyze/stream');
+  
+  analyzeEventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.sourceId === -1) {
+        analysisStatusTitle.innerText = data.message;
+        addLog(data.message);
+      }
+    } catch (err) {
+      console.error("Erro ao ler log de análise:", err);
+    }
+  };
+
+  analyzeEventSource.onerror = () => {};
+
+  try {
+    if (currentAnalysisAbortController) currentAnalysisAbortController.abort();
+    currentAnalysisAbortController = new AbortController();
+
+    const res = await fetch(`/api/sources/analyze-url`, { 
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, name }),
+      signal: currentAnalysisAbortController.signal
+    });
+    
+    if (analyzeEventSource) {
+      analyzeEventSource.close();
+      analyzeEventSource = null;
+    }
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || "Erro desconhecido na análise");
+    }
+
+    const result = await res.json();
+    if (!result.success || !result.analysis) {
+      throw new Error(result.error || "A IA não conseguiu determinar a estratégia do site.");
+    }
+
+    currentAnalysisResult = result.analysis;
+    const tempSourceObj = {
+      name: result.analysis.siteName || name || new URL(url).hostname || 'Nova Fonte',
+      url: url,
+      searchUrlPattern: url,
+      description: '',
+      contentTypes: []
+    };
+    showAnalysisResult(tempSourceObj, result.analysis);
+  } catch (err) {
+    if (analyzeEventSource) {
+      analyzeEventSource.close();
+      analyzeEventSource = null;
+    }
+    if (err.name === 'AbortError') {
+      addLog("Análise cancelada pelo usuário.");
+      return;
+    }
+    showAnalysisError(err.message);
+  } finally {
+    currentAnalysisAbortController = null;
+  }
+}
+
 // Analisa um site individualmente
 async function analyzeSource(id) {
   const source = searchSources.find(s => s.id === id);
@@ -2990,7 +3125,16 @@ async function analyzeSource(id) {
   }
 }
 
-function showAnalysisResult(source, analysis) {
+function showAnalysisResult(source, rawAnalysis) {
+  // Normalização defensiva dos dados da análise para o frontend
+  const analysis = {
+    strategyType: rawAnalysis.strategyType || 'unknown',
+    detectedPattern: rawAnalysis.detectedPattern || source.searchUrlPattern || "",
+    explanation: rawAnalysis.explanation || "Nenhuma explicação fornecida pela IA.",
+    optimizedDescription: rawAnalysis.optimizedDescription || source.description || "",
+    contentTypes: rawAnalysis.contentTypes || source.contentTypes || []
+  };
+
   analysisLoadingState.classList.add('hidden');
   analysisErrorState.classList.add('hidden');
   analysisResultState.classList.remove('hidden');
@@ -3047,11 +3191,44 @@ function showAnalysisError(msg) {
   retryAnalysisBtn.classList.remove('hidden');
 
   analysisErrorMsg.innerText = msg;
-  retryAnalysisBtn.onclick = () => analyzeSource(currentAnalysisSourceId);
+  retryAnalysisBtn.onclick = () => {
+    if (currentAnalysisSourceId === -1) {
+      analyzeSourceUrl(sourceUrlInput.value.trim(), sourceNameInput.value.trim());
+    } else {
+      analyzeSource(currentAnalysisSourceId);
+    }
+  };
 }
 
-// Aplica o resultado da análise salvando no DB
+// Aplica o resultado da análise salvando no DB ou preenchendo o modal
 async function applyAnalysisResult(id, analysis) {
+  const isSourceModalVisible = sourceModal && !sourceModal.classList.contains('hidden');
+  
+  if (id === -1 || isSourceModalVisible) {
+    if (analysis.siteName) {
+      sourceNameInput.value = analysis.siteName;
+    } else if (!sourceNameInput.value) {
+      try {
+        sourceNameInput.value = new URL(sourceUrlInput.value).hostname;
+      } catch (e) {
+        sourceNameInput.value = sourceUrlInput.value;
+      }
+    }
+    sourcePatternInput.value = analysis.detectedPattern || sourceUrlInput.value;
+    sourceDescriptionInput.value = analysis.optimizedDescription || '';
+    
+    // Checkboxes of contentTypes
+    const contentTypes = analysis.contentTypes || [];
+    const checkboxes = sourceForm.querySelectorAll('input[name="contentTypes"]');
+    checkboxes.forEach(cb => {
+      cb.checked = contentTypes.includes(cb.value);
+    });
+
+    showDelugeToast("Campos do formulário preenchidos com a otimização da IA!", "success");
+    sourceAnalysisModal.classList.add('hidden');
+    return;
+  }
+
   const source = searchSources.find(s => s.id === id);
   if (!source) return;
 
@@ -3069,7 +3246,7 @@ async function applyAnalysisResult(id, analysis) {
         searchUrlPattern: analysis.detectedPattern,
         description: analysisDescription.value.trim(),
         contentTypes: analysis.contentTypes,
-        isActive: source.isActive
+        isActive: analysis.isActive !== undefined ? analysis.isActive : source.isActive
       })
     });
 
@@ -3093,7 +3270,10 @@ async function cancelAnalysisAndClose() {
       currentAnalysisAbortController.abort();
     }
     // Notifica backend para parar Puppeteer
-    fetch(`/api/sources/${currentAnalysisSourceId}/analyze/cancel`, { method: 'POST' }).catch(() => {});
+    const cancelUrl = currentAnalysisSourceId === -1 
+      ? `/api/sources/analyze-url/cancel` 
+      : `/api/sources/${currentAnalysisSourceId}/analyze/cancel`;
+    fetch(cancelUrl, { method: 'POST' }).catch(() => {});
   }
   
   if (analyzeEventSource) {
@@ -3111,15 +3291,20 @@ let batchEventSource = null;
 let isBatchCancelled = false;
 
 async function analyzeAllSources() {
-  const activeSources = searchSources.filter(s => s.isActive);
-  if (activeSources.length === 0) {
-    showDelugeToast("Nenhum site ativo cadastrado para otimizar.", "warning");
+  // Ordena para começar pelos desativados (isActive = false primeiro)
+  const sortedSources = [...searchSources].sort((a, b) => {
+    if (a.isActive === b.isActive) return 0;
+    return a.isActive ? 1 : -1;
+  });
+
+  if (sortedSources.length === 0) {
+    showDelugeToast("Nenhum site cadastrado para otimizar.", "warning");
     return;
   }
 
   isBatchCancelled = false;
   batchAnalysisModal.classList.remove('hidden');
-  batchProgressText.innerText = `0 / ${activeSources.length} Sites`;
+  batchProgressText.innerText = `0 / ${sortedSources.length} Sites`;
   batchProgressBar.style.width = '0%';
   
   // Configura botões do footer
@@ -3127,7 +3312,7 @@ async function analyzeAllSources() {
   closeBatchBtn.classList.add('hidden');
 
   // Popula lista de sites
-  batchSitesList.innerHTML = activeSources.map(source => `
+  batchSitesList.innerHTML = sortedSources.map(source => `
     <div id="batch-row-${source.id}" class="p-3.5 flex flex-col gap-2 text-xs transition-colors duration-150 border-b border-slate-100 dark:border-slate-800/80">
       <div class="flex items-center justify-between">
         <div>
@@ -3174,8 +3359,8 @@ async function analyzeAllSources() {
     isBatchCancelled = true;
     
     // Se houver uma análise rodando, cancela ela
-    if (activeSources[completed]) {
-      const runningSource = activeSources[completed];
+    if (sortedSources[completed]) {
+      const runningSource = sortedSources[completed];
       if (currentAnalysisAbortController) {
         currentAnalysisAbortController.abort();
       }
@@ -3190,8 +3375,8 @@ async function analyzeAllSources() {
     showDelugeToast("Análise em lote cancelada pelo usuário.", "warning");
 
     // Preenche status de cancelado nos restantes
-    for (let i = completed; i < activeSources.length; i++) {
-      const s = activeSources[i];
+    for (let i = completed; i < sortedSources.length; i++) {
+      const s = sortedSources[i];
       const statusEl = document.getElementById(`batch-status-${s.id}`);
       const rowEl = document.getElementById(`batch-row-${s.id}`);
       if (statusEl && rowEl) {
@@ -3207,7 +3392,7 @@ async function analyzeAllSources() {
     closeBatchBtn.classList.remove('hidden');
   };
 
-  for (const source of activeSources) {
+  for (const source of sortedSources) {
     if (isBatchCancelled) break;
 
     const statusContainer = document.getElementById(`batch-status-${source.id}`);
@@ -3232,28 +3417,30 @@ async function analyzeAllSources() {
       });
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Erro de resposta do servidor");
-      }
-
-      const result = await res.json();
-      if (!result.success || !result.analysis) {
+        const result = await res.json().catch(() => ({}));
         if (result.isConnectionError) {
-          rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-amber-500/5 dark:bg-amber-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
+          rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-red-500/5 dark:bg-red-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
           statusContainer.innerHTML = `
-            <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-400 font-bold mr-1.5" title="${result.error}">Inacessível</span>
-            <i class="ph-bold ph-warning-circle text-lg text-amber-500" title="${result.error}"></i>
+            <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-500/10 border border-red-500/25 text-red-600 dark:text-red-400 font-bold mr-1.5" title="${result.error}">Inacessível (Desativado)</span>
+            <i class="ph-bold ph-warning-circle text-lg text-red-500" title="${result.error}"></i>
           `;
           if (logBox) logBox.classList.add('hidden');
           completed++;
-          batchProgressText.innerText = `${completed} / ${activeSources.length} Sites`;
-          batchProgressBar.style.width = `${(completed / activeSources.length) * 100}%`;
+          batchProgressText.innerText = `${completed} / ${sortedSources.length} Sites`;
+          batchProgressBar.style.width = `${(completed / sortedSources.length) * 100}%`;
           continue;
         }
         throw new Error(result.error || "A IA falhou em analisar.");
       }
 
-      const analysis = result.analysis;
+      const result = await res.json();
+      const analysis = {
+        detectedPattern: result.analysis.detectedPattern || source.searchUrlPattern || "",
+        optimizedDescription: result.analysis.optimizedDescription || source.description || "",
+        explanation: result.analysis.explanation || "Nenhuma explicação fornecida pela IA.",
+        contentTypes: result.analysis.contentTypes || source.contentTypes || [],
+        isActive: result.analysis.isActive !== undefined ? result.analysis.isActive : source.isActive
+      };
       
       // Oculta log box se terminou com sucesso para limpar layout e focar no diff
       if (logBox) logBox.classList.add('hidden');
@@ -3271,21 +3458,27 @@ async function analyzeAllSources() {
           searchUrlPattern: analysis.detectedPattern,
           description: analysis.optimizedDescription || source.description,
           contentTypes: analysis.contentTypes || source.contentTypes,
-          isActive: source.isActive
+          isActive: analysis.isActive
         })
       });
 
       if (!updateRes.ok) throw new Error("Erro ao salvar atualizações");
 
       // Sucesso! Atualiza UI da linha com comparativo de diferenças
-      rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-emerald-500/5 dark:bg-emerald-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
-      
-      if (hasPatternDiff || hasDescriptionDiff) {
+      if (!analysis.isActive) {
+        rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-red-500/5 dark:bg-red-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
+        statusContainer.innerHTML = `
+          <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-500/10 border border-red-500/20 text-red-500 font-bold mr-1.5">Desativado</span>
+          <i class="ph-bold ph-warning-circle text-lg text-red-500"></i>
+        `;
+      } else if (hasPatternDiff || hasDescriptionDiff) {
+        rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-emerald-500/5 dark:bg-emerald-950/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
         statusContainer.innerHTML = `
           <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 font-bold mr-1.5">Otimizado</span>
           <i class="ph-bold ph-check-circle text-lg text-emerald-500"></i>
         `;
       } else {
+        rowEl.className = "p-3.5 flex flex-col gap-2 text-xs bg-slate-500/5 dark:bg-slate-800/10 border-b border-slate-100 dark:border-slate-800/80 transition-colors duration-150";
         statusContainer.innerHTML = `
           <span class="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 font-bold mr-1.5">Sem Alterações</span>
           <i class="ph-bold ph-check-circle text-lg text-slate-400"></i>
@@ -3366,8 +3559,8 @@ async function analyzeAllSources() {
     }
 
     completed++;
-    batchProgressText.innerText = `${completed} / ${activeSources.length} Sites`;
-    batchProgressBar.style.width = `${(completed / activeSources.length) * 100}%`;
+    batchProgressText.innerText = `${completed} / ${sortedSources.length} Sites`;
+    batchProgressBar.style.width = `${(completed / sortedSources.length) * 100}%`;
   }
 
   // Finaliza lote

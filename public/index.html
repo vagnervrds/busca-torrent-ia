@@ -501,7 +501,7 @@
                 <button id="exportSourcesBtn" class="py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-lg text-xs flex items-center gap-1 border border-slate-200/50 dark:border-slate-700/50 transition-all">
                   <i class="ph-bold ph-download-simple"></i> Exportar
                 </button>
-                <button id="optimizeAllSourcesBtn" class="py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 transition-all" title="Analisar a melhor estratégia de busca para todos os sites ativos">
+                <button id="optimizeAllSourcesBtn" class="py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 transition-all" title="Analisar a melhor estratégia de busca para todos os sites (começando pelos desativados)">
                   <i class="ph-bold ph-sparkle"></i> Analisar Todos (IA)
                 </button>
                 <button id="addSourceBtn" class="py-2 px-3 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg text-xs flex items-center gap-1 transition-all">
@@ -554,26 +554,31 @@
         <!-- Nome -->
         <div class="space-y-1">
           <label for="sourceNameInput" class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Nome do Site</label>
-          <input type="text" id="sourceNameInput" placeholder="Ex: Nyaa.si" required class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium">
+          <input type="text" id="sourceNameInput" placeholder="Ex: Nyaa.si" class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium">
         </div>
 
         <!-- URL Base -->
         <div class="space-y-1">
           <label for="sourceUrlInput" class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">URL Base</label>
-          <input type="url" id="sourceUrlInput" placeholder="Ex: https://nyaa.si/" required class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium">
+          <div class="flex gap-2">
+            <input type="url" id="sourceUrlInput" placeholder="Ex: https://nyaa.si/" required class="flex-1 py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium">
+            <button type="button" id="optimizeSingleUrlBtn" class="py-2 px-3.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center gap-1 transition-all shadow-sm" title="Analisar site com IA e preencher campos automaticamente">
+              <i class="ph-bold ph-sparkle"></i> Otimizar com IA
+            </button>
+          </div>
         </div>
 
         <!-- Padrão URL Busca -->
         <div class="space-y-1">
           <label for="sourcePatternInput" class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Padrão de URL de Busca</label>
-          <input type="text" id="sourcePatternInput" placeholder="Ex: https://nyaa.si/?q={query}" required class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium">
+          <input type="text" id="sourcePatternInput" placeholder="Ex: https://nyaa.si/?q={query}" class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium">
           <p class="text-[9px] text-slate-400 dark:text-slate-500">Use a tag <code class="font-mono text-brand-500">{query}</code> onde a palavra-chave de pesquisa será inserida pelo agente.</p>
         </div>
 
         <!-- Descrição -->
         <div class="space-y-1">
           <label for="sourceDescriptionInput" class="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Descrição do Site (Para IA)</label>
-          <textarea id="sourceDescriptionInput" rows="3" placeholder="Descreva os tipos de arquivos e idiomas comumente encontrados neste site para ajudar a IA a decidir se deve usá-lo." required class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium resize-none"></textarea>
+          <textarea id="sourceDescriptionInput" rows="3" placeholder="Descreva os tipos de arquivos e idiomas comumente encontrados neste site para ajudar a IA a decidir se deve usá-lo." class="w-full py-2 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 font-medium resize-none"></textarea>
         </div>
 
         <!-- Tipos de Conteúdos -->

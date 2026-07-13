@@ -217,14 +217,29 @@ app.post('/api/sources', async (req, res) => {
   try {
     const { name, url, searchUrlPattern, description, contentTypes, isActive } = req.body;
     
-    if (!name || !url || !searchUrlPattern) {
-      return res.status(400).json({ error: 'Nome, URL base e Padrão de URL de Busca são obrigatórios.' });
+    if (!url) {
+      return res.status(400).json({ error: 'URL base é obrigatória.' });
+    }
+
+    let finalName = name ? name.trim() : '';
+    if (!finalName) {
+      try {
+        finalName = new URL(url).hostname;
+      } catch (e) {
+        finalName = 'Nova Fonte';
+      }
+    }
+
+    let finalPattern = searchUrlPattern ? searchUrlPattern.trim() : '';
+    if (!finalPattern) {
+      const base = url.endsWith('/') ? url : url + '/';
+      finalPattern = `${base}?q={query}`;
     }
     
     const source = await SearchSource.create({
-      name: name.trim(),
+      name: finalName,
       url: url.trim(),
-      searchUrlPattern: searchUrlPattern.trim(),
+      searchUrlPattern: finalPattern,
       description: description ? description.trim() : '',
       contentTypes: JSON.stringify(contentTypes || []),
       isActive: isActive !== false
@@ -249,11 +264,28 @@ app.put('/api/sources/:id', async (req, res) => {
     if (!source) {
       return res.status(404).json({ error: 'Fonte de busca não encontrada.' });
     }
+
+    let finalUrl = url !== undefined ? url.trim() : source.url;
+
+    let finalName = name !== undefined ? name.trim() : source.name;
+    if (!finalName && finalUrl) {
+      try {
+        finalName = new URL(finalUrl).hostname;
+      } catch (e) {
+        finalName = 'Nova Fonte';
+      }
+    }
+
+    let finalPattern = searchUrlPattern !== undefined ? searchUrlPattern.trim() : source.searchUrlPattern;
+    if (!finalPattern && finalUrl) {
+      const base = finalUrl.endsWith('/') ? finalUrl : finalUrl + '/';
+      finalPattern = `${base}?q={query}`;
+    }
     
     await source.update({
-      name: name !== undefined ? name.trim() : source.name,
-      url: url !== undefined ? url.trim() : source.url,
-      searchUrlPattern: searchUrlPattern !== undefined ? searchUrlPattern.trim() : source.searchUrlPattern,
+      name: finalName,
+      url: finalUrl,
+      searchUrlPattern: finalPattern,
       description: description !== undefined ? description.trim() : source.description,
       contentTypes: contentTypes !== undefined ? JSON.stringify(contentTypes) : source.contentTypes,
       isActive: isActive !== undefined ? isActive : source.isActive
@@ -284,6 +316,45 @@ app.delete('/api/sources/:id', async (req, res) => {
     
     await source.destroy();
     res.json({ success: true, message: 'Fonte de busca removida com sucesso.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Analisar estratégia de busca de URL temporária/rascunho com IA
+app.post('/api/sources/analyze-url', async (req, res) => {
+  const { url, name } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: 'URL base é obrigatória.' });
+  }
+
+  // Cria um objeto temporário simulando a estrutura do SearchSource
+  const tempSource = {
+    id: -1, // ID especial para novos temporários
+    name: name || new URL(url).hostname || 'Nova Fonte',
+    url: url,
+    searchUrlPattern: url, // Padrão inicial temporário
+    description: '',
+    contentTypes: '[]',
+    isActive: true
+  };
+
+  try {
+    const result = await analyzeSearchSource(tempSource);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error, isConnectionError: result.isConnectionError });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cancelar análise temporária
+app.post('/api/sources/analyze-url/cancel', async (req, res) => {
+  try {
+    const result = await cancelSearchSourceAnalysis(-1);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
