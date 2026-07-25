@@ -145,6 +145,13 @@ class DelugeClient {
   async remove(torrentId, removeData = false) {
     return this.request('core.remove_torrent', [torrentId, removeData]);
   }
+
+  /**
+   * Obtém as configurações do daemon (incluindo diretórios)
+   */
+  async getConfig() {
+    return this.request('core.get_config');
+  }
 }
 
 /**

@@ -5,6 +5,10 @@ const { enqueueSearch, stopSearchAgent, testConnection, analyzeSearchSource, can
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
 
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+
 const app = express();
 const PORT = process.env.PORT || 4182;
 
@@ -62,6 +66,12 @@ async function getDelugeClient() {
 
 // Servir arquivos estáticos do frontend
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Clean routes for frontend pages
+app.get('/storage', (req, res) => {
+  console.log(`[Frontend] Acesso à página de armazenamento (WizTree) recebido.`);
+  res.sendFile(path.join(__dirname, 'public', 'storage.html'));
+});
 
 // Gerenciamento de conexões SSE em tempo real
 const sseClients = new Map(); // searchId -> Set de Response
@@ -524,7 +534,6 @@ app.post('/api/searches/:id/restart', async (req, res) => {
 
     if (!resume) {
       await AgentLog.destroy({ where: { searchId } });
-      await TorrentResult.destroy({ where: { searchId } });
       await TorrentEvaluation.destroy({ where: { searchId } });
       search.type = 'unknown';
       search.episodesCount = 'unknown';
@@ -619,6 +628,7 @@ app.delete('/api/searches/:id', async (req, res) => {
   try {
     await stopSearchAgent(searchId);
     
+    await AgentLog.destroy({ where: { searchId } });
     const deleted = await Search.destroy({ where: { id: searchId } });
     if (!deleted) {
       return res.status(404).json({ error: 'Busca não encontrada.' });
@@ -844,6 +854,171 @@ app.post('/api/deluge/torrents/remove-errors', async (req, res) => {
 });
 
 
+// --- 11. ROTAS DO ARMAZENAMENTO (WIZTREE STYLE) ---
+
+const fs = require('fs');
+
+async function discoverDelugePath() {
+  try {
+    const existing = await SystemSetting.findOne({ where: { key: 'deluge_download_path' } });
+    if (existing && existing.value) {
+      console.log(`[Storage] Caminho do Deluge já conhecido: ${existing.value}`);
+      return existing.value;
+    }
+
+    console.log('[Storage] Descobrindo caminho do Deluge via API...');
+    
+    try {
+      const client = await getDelugeClient();
+      const config = await client.getConfig();
+      if (config && config.download_location) {
+        const foundPath = config.download_location;
+        await SystemSetting.upsert({ key: 'deluge_download_path', value: foundPath });
+        console.log(`[Storage] Caminho do Deluge descoberto e salvo via API: ${foundPath}`);
+        return foundPath;
+      }
+    } catch (apiErr) {
+      console.warn('[Storage] Falha ao descobrir via API do Deluge:', apiErr.message);
+    }
+
+    console.log('[Storage] Tentando fallback via leitura de arquivo...');
+    let configStr = '';
+    const configPaths = [
+      '/var/lib/deluged/config/core.conf',
+      '/var/lib/deluge/.config/deluge/core.conf',
+      path.join(require('os').homedir(), '.config/deluge/core.conf')
+    ];
+    
+    for (const p of configPaths) {
+      try {
+        configStr = fs.readFileSync(p, 'utf8');
+        break;
+      } catch (e) {}
+    }
+
+    if (configStr) {
+      let download_location = configStr.match(/"download_location"\s*:\s*"([^"]+)"/);
+      if (download_location) {
+        let foundPath = download_location[1];
+        await SystemSetting.upsert({ key: 'deluge_download_path', value: foundPath });
+        console.log(`[Storage] Caminho do Deluge descoberto e salvo via Arquivo: ${foundPath}`);
+        return foundPath;
+      }
+    }
+    
+    console.log('[Storage] Não foi possível descobrir o caminho do Deluge.');
+    return null;
+  } catch (err) {
+    console.error('[Storage] Erro ao descobrir caminho do Deluge:', err.message);
+    return null;
+  }
+}
+
+app.post('/api/storage/discover-path', async (req, res) => {
+  const pathStr = await discoverDelugePath();
+  if (pathStr) {
+    res.json({ success: true, path: pathStr });
+  } else {
+    res.status(500).json({ success: false, error: 'Não foi possível encontrar o caminho do Deluge' });
+  }
+});
+
+app.get('/api/storage/tree', async (req, res) => {
+  try {
+    const setting = await SystemSetting.findOne({ where: { key: 'deluge_download_path' } });
+    if (!setting || !setting.value) {
+      return res.status(400).json({ error: 'Caminho do Deluge não descoberto ainda. Vá nas configurações e descubra-o primeiro.' });
+    }
+    const targetDir = setting.value;
+
+    console.log(`[Storage] Iniciando mapeamento da pasta: ${targetDir}`);
+    
+    const { Worker } = require('worker_threads');
+    
+    let rootFiles;
+    try { 
+      rootFiles = await fs.promises.readdir(targetDir); 
+    } catch(e) { 
+      console.error(`[Storage] Erro ao ler a pasta raiz do Deluge (${targetDir}):`, e.message);
+      throw new Error("Não foi possível ler o diretório raiz."); 
+    }
+    
+    console.log(`[Storage] Foram encontrados ${rootFiles.length} itens na raiz.`);
+    
+    const rootPaths = rootFiles.map(f => path.join(targetDir, f));
+    
+    // Divisão exata para 2 threads
+    const half = Math.ceil(rootPaths.length / 2);
+    const chunk1 = rootPaths.slice(0, half);
+    const chunk2 = rootPaths.slice(half);
+    
+    const runWorker = (pathsChunk) => {
+      return new Promise((resolve, reject) => {
+        if (pathsChunk.length === 0) return resolve([]);
+        const worker = new Worker(path.join(__dirname, 'storage_worker.js'), {
+          workerData: { paths: pathsChunk, maxDepth: 5 }
+        });
+        worker.on('message', msg => {
+          if (msg.error) reject(new Error(msg.error));
+          else resolve(msg.results);
+        });
+        worker.on('error', reject);
+        worker.on('exit', code => {
+          if (code !== 0) reject(new Error(`Worker stopped with exit code ${code}`));
+        });
+      });
+    };
+    
+    // Executamos as duas threads em paralelo
+    const [results1, results2] = await Promise.all([
+      runWorker(chunk1),
+      runWorker(chunk2)
+    ]);
+    
+    const rootChildren = [...results1, ...results2];
+    
+    let rootSize = 0;
+    for (const child of rootChildren) {
+       rootSize += child.value;
+    }
+    
+    const tree = { 
+       name: path.basename(targetDir), 
+       path: targetDir, 
+       value: rootSize, 
+       children: rootChildren 
+    };
+    
+    res.json(tree);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/storage/delete', async (req, res) => {
+  const { path: targetPath } = req.body;
+  if (!targetPath) return res.status(400).json({ error: 'Caminho é obrigatório' });
+  
+  try {
+    const setting = await SystemSetting.findOne({ where: { key: 'deluge_download_path' } });
+    if (!setting || !setting.value) {
+      return res.status(400).json({ error: 'Caminho do Deluge não definido.' });
+    }
+    
+    if (!targetPath.startsWith(setting.value)) {
+      return res.status(403).json({ error: 'Operação negada. O caminho deve estar dentro do diretório de downloads do Deluge.' });
+    }
+    
+    // Native node removal
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // Inicialização do Banco de Dados e Servidor
 initDatabase().then(async () => {
   // Reseta buscas que ficaram travadas no estado "searching" devido a quedas/reinicializações
@@ -863,6 +1038,11 @@ initDatabase().then(async () => {
   // Executa a verificação inicial do Deluge de forma assíncrona
   verificarDeluge().catch(err => {
     console.error("Erro na verificação inicial do Deluge:", err.message);
+  });
+
+  // Descobre o caminho do Deluge no servidor se ainda não foi mapeado
+  discoverDelugePath().catch(err => {
+    console.error("Erro ao descobrir o caminho inicial do Deluge:", err.message);
   });
 
   function obterIpLocal() {

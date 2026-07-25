@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Armazenamento - WizTree IA</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="storage.css">
+    <!-- ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation (mimicking the main app, simplified) -->
+        <aside class="sidebar glass-panel">
+            <div class="logo-area">
+                <i class="fa-solid fa-server pulse-icon"></i>
+                <h1>Target<span class="highlight">Sync</span></h1>
+            </div>
+            <nav class="main-nav">
+                <a href="/" class="nav-item">
+                    <i class="fa-solid fa-magnifying-glass"></i> Busca
+                </a>
+                <a href="/storage" class="nav-item active">
+                    <i class="fa-solid fa-hard-drive"></i> Armazenamento
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-header glass-panel">
+                <div class="header-titles">
+                    <h2>Gerenciador de Armazenamento</h2>
+                    <p class="subtitle">Descubra e apague arquivos grandes facilmente.</p>
+                </div>
+                <div class="header-actions">
+                    <button id="btn-discover" class="btn-primary">
+                        <i class="fa-solid fa-radar"></i> Redescobrir Caminho
+                    </button>
+                    <button id="btn-refresh" class="btn-secondary">
+                        <i class="fa-solid fa-rotate-right"></i> Atualizar Gráfico
+                    </button>
+                </div>
+            </header>
+
+            <div class="storage-workspace glass-panel">
+                <div id="loading-overlay" class="loading-overlay">
+                    <div class="spinner"></div>
+                    <h3 id="loading-text">Analisando armazenamento no servidor...</h3>
+                    <p>Isso pode levar alguns segundos dependendo da quantidade de arquivos.</p>
+                </div>
+                
+                <div id="path-not-found" class="error-overlay hidden">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <h3>Caminho do Deluge Desconhecido</h3>
+                    <p>Precisamos descobrir onde seus downloads são salvos antes de gerar o gráfico.</p>
+                    <button id="btn-discover-overlay" class="btn-primary mt-3">
+                        Descobrir Agora
+                    </button>
+                </div>
+
+                <div id="treemap-container" class="chart-container"></div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Context Modal / Selected Item Panel -->
+    <div id="item-panel" class="item-panel hidden glass-panel">
+        <button id="close-panel" class="btn-close"><i class="fa-solid fa-xmark"></i></button>
+        <h3 id="item-name" class="item-name">Nome do Arquivo</h3>
+        <p id="item-path" class="item-path">/caminho/completo</p>
+        <div class="item-stats">
+            <div class="stat-box">
+                <span class="stat-label">Tamanho</span>
+                <span id="item-size" class="stat-value">0 MB</span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-label">Tipo</span>
+                <span id="item-type" class="stat-value">Arquivo</span>
+            </div>
+        </div>
+        <button id="btn-delete" class="btn-danger">
+            <i class="fa-solid fa-trash-can"></i> Apagar Definitivamente
+        </button>
+    </div>
+
+    <script src="storage.js"></script>
+</body>
+</html>

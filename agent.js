@@ -100,31 +100,32 @@ async function preparePageForHumanLikeBehavior(page) {
   // Viewport realista
   await page.setViewport({ width: 1920, height: 1080 });
 
-  // User-Agent moderno e comum
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+  // Disfarça o User-Agent dinamicamente para bater exatamente com a versão do Chrome/Chromium rodando
+  try {
+    const originalUA = await page.evaluate(() => navigator.userAgent);
+    const cleanUA = originalUA.replace('HeadlessChrome/', 'Chrome/');
+    await page.setUserAgent(cleanUA);
+  } catch (e) {
+    // Fallback caso falhe por algum motivo
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+  }
 
-  // Cabeçalhos HTTP padrão de navegador real
+  // Define apenas preferências de idioma de navegador real
+  // Evitar cabeçalhos globais de Sec-Fetch-* pois eles vazam para sub-recursos e causam bloqueios/timeouts
   await page.setExtraHTTPHeaders({
-    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1',
-    'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"'
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
   });
 
-  // Oculta assinaturas comuns do Puppeteer
+  // Oculta assinaturas comuns do Puppeteer no carregamento do DOM
   await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined
-    });
+    try {
+      delete navigator.__proto__.webdriver;
+    } catch (e) {}
+    
     Object.defineProperty(navigator, 'languages', {
       get: () => ['pt-BR', 'pt', 'en-US', 'en']
     });
+    
     Object.defineProperty(navigator, 'plugins', {
       get: () => [
         { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' },
@@ -152,13 +153,92 @@ async function simulateHumanInteraction(page) {
   }
 }
 
+// Detecta se a página está sob desafio do Cloudflare e tenta resolvê-lo simulando interações e aguardando
+async function solveCloudflareChallengeIfNeeded(page, searchId, sourceName = 'Site', logFn = null) {
+  const log = logFn || ((msg, level = 'info') => logAgent(searchId, msg, level));
+  
+  try {
+    let title = await page.title();
+    const isCloudflare = title.includes('Cloudflare') || 
+                        title.includes('Just a moment') || 
+                        title.includes('Attention Required') || 
+                        title.includes('Um momento');
+                        
+    if (!isCloudflare) return false;
+
+    await log(`[Cloudflare] Desafio/CAPTCHA do Cloudflare detectado em ${sourceName}. Iniciando rotina de resolução automática...`, 'warn');
+    
+    // Tenta até 4 ciclos de interações e esperas
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      await log(`[Cloudflare] [Etapa ${attempt}/4] Simulando interação física e aguardando liberação...`, 'info');
+      
+      // Simulação física realista
+      try {
+        await page.mouse.move(100 + attempt * 50, 100 + attempt * 50);
+        await page.mouse.move(200 + attempt * 50, 300 + attempt * 50, { steps: 10 });
+        await page.evaluate(() => window.scrollBy(0, 30));
+      } catch (interactionErr) {
+        // Ignora erros de interação se o contexto estiver mudando
+      }
+      
+      // Aguarda 4.5 segundos
+      await new Promise(r => setTimeout(r, 4500));
+      
+      // Verifica o título atualizado
+      try {
+        title = await page.title();
+        if (!title.includes('Cloudflare') && !title.includes('Just a moment') && !title.includes('Attention Required') && !title.includes('Um momento')) {
+          await log(`[Cloudflare] Sucesso: Desafio de segurança do Cloudflare superado em ${sourceName}!`, 'info');
+          return true;
+        }
+      } catch (titleErr) {
+        // Se der erro de contexto destruído, provavelmente está redirecionando/carregando a página real
+        await log(`[Cloudflare] Contexto de página alterado/redirecionado. Aguardando estabilização...`, 'info');
+        await new Promise(r => setTimeout(r, 3000));
+        return true;
+      }
+    }
+    
+    // Se saiu do loop e ainda tem o título bloqueado
+    throw new Error(`Acesso bloqueado pela proteção contra bots do Cloudflare em ${sourceName} (limite de tentativas excedido).`);
+  } catch (err) {
+    if (err.message.includes('bloqueado pela proteção')) {
+      throw err;
+    }
+    // Outros erros inesperados, retorna falso para prosseguir sob próprio risco
+    console.error(`[Cloudflare] Erro ao executar helper do Cloudflare:`, err.message);
+    return false;
+  }
+}
+
 // Lanca o browser com retry (até 3 tentativas) e timeout estendido para hardware limitado
 // Remove --single-process que é a causa direta do erro de WS timeout no Linux
 async function launchBrowserWithRetry(searchId) {
   // Limpa browsers órfãos antes de lançar novo
   await ensureNoBrowserLeaks();
   
-  const executablePath = detectChromiumExecutable();
+  const path = require('path');
+  const fs = require('fs');
+
+  // Detectar executável do Chrome (Windows) ou Chromium (Linux)
+  let executablePath = null;
+  if (process.platform === 'win32') {
+    const candidates = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      path.join(process.env.LOCALAPPDATA || 'C:\\Users\\Admin\\AppData\\Local', 'Google\\Chrome\\Application\\chrome.exe')
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        executablePath = p;
+        console.log(`[Puppeteer] Google Chrome oficial localizado em: ${p}`);
+        break;
+      }
+    }
+  }
+  if (!executablePath) {
+    executablePath = detectChromiumExecutable();
+  }
   
   // Flags otimizadas para DietPi/Linux ARM com hardware limitado
   // NOTA: --single-process REMOVIDA intencionalmente — causa timeout de WS no Linux
@@ -167,7 +247,7 @@ async function launchBrowserWithRetry(searchId) {
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',       // Crítico em hardware limitado (pouca /dev/shm)
     '--disable-blink-features=AutomationControlled',
-    '--window-size=1366,768',
+    '--window-size=1920,1080',
     '--disable-gpu',
     '--disable-software-rasterizer',
     '--disable-extensions',
@@ -178,12 +258,21 @@ async function launchBrowserWithRetry(searchId) {
     '--disable-translate',
     '--mute-audio',
     '--no-first-run',
-    '--disable-infobars'
+    '--disable-infobars',
+    '--lang=pt-BR,pt'
   ];
+  
+  const profileDir = path.join(__dirname, 'tmp', 'puppeteer_profile');
+  if (!fs.existsSync(path.dirname(profileDir))) {
+    try {
+      fs.mkdirSync(path.dirname(profileDir), { recursive: true });
+    } catch (e) {}
+  }
   
   const launchOptions = {
     headless: true,
     args: launchArgs,
+    ignoreDefaultArgs: ['--enable-automation'],
     timeout: 90000,          // 90s para hardware lento como DietPi
     protocolTimeout: 90000   // Também estende o timeout do protocolo CDP
   };
@@ -201,6 +290,14 @@ async function launchBrowserWithRetry(searchId) {
         const delay = attempt * 3000; // 3s, 6s entre tentativas
         await logAgent(searchId, `[Puppeteer] Tentativa ${attempt}/${maxAttempts} de iniciar o browser (aguardando ${delay/1000}s)...`, 'warn');
         await new Promise(r => setTimeout(r, delay));
+      }
+      
+      // Usa perfil persistente nas primeiras tentativas. Se der erro (ex: lock de arquivo), tenta sem perfil na última.
+      if (attempt < maxAttempts) {
+        launchOptions.userDataDir = profileDir;
+      } else {
+        delete launchOptions.userDataDir;
+        await logAgent(searchId, `[Puppeteer] Tentando inicializar browser sem perfil persistente (userDataDir) para contornar travamentos...`, 'warn');
       }
       
       const browser = await puppeteer.launch(launchOptions);
@@ -226,6 +323,9 @@ async function logAgent(searchId, message, level = 'info') {
   console.log(`[Busca #${searchId || 'SISTEMA'}] [${level.toUpperCase()}] ${message}`);
   if (!searchId) return;
   const log = await AgentLog.create({ searchId, message, level });
+  
+  // Update the search's updatedAt so it bubbles up to the top of the history
+  await Search.update({ updatedAt: new Date() }, { where: { id: searchId } });
   
   if (global.sseBroadcast) {
     global.sseBroadcast(searchId, {
@@ -556,11 +656,10 @@ async function runSearchAgent(searchId, resumeMode = true) {
     await logAgent(searchId, `Iniciando agente de IA para busca: "${search.query}"`, 'info');
     await logAgent(searchId, `Idioma preferencial: ${config.preferredLanguage} | Resolução: ${config.preferredResolution}`, 'info');
     
-    // Se não for modo de retomada, limpa resultados anteriores
+    // Se não for modo de retomada, limpa resultados de avaliações antigas para reavaliar, mas preserva os torrents encontrados
     if (!resumeMode) {
-      await TorrentResult.destroy({ where: { searchId } });
       await TorrentEvaluation.destroy({ where: { searchId } });
-      await logAgent(searchId, "Limpo histórico de busca anterior. Iniciando do zero.", "info");
+      await logAgent(searchId, "Iniciando nova busca. Histórico de avaliação limpo para reavaliação. Resultados de torrents anteriores foram mantidos.", "info");
     } else {
       await logAgent(searchId, "Modo de Retomada ativo. Carregando histórico para pular torrents já avaliados.", "info");
     }
@@ -744,16 +843,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
             await simulateHumanInteraction(tempPage);
             
             // Detecção ativa de Cloudflare
-            const pageTitle = await tempPage.title();
-            if (pageTitle.includes('Cloudflare') || pageTitle.includes('Just a moment') || pageTitle.includes('Attention Required')) {
-              await logAgent(searchId, `[Cloudflare] Desafio de segurança detectado em ${source.name}. Aguardando desafio automático por 8s...`, 'warn');
-              await new Promise(r => setTimeout(r, 8000));
-              const pageTitleRetry = await tempPage.title();
-              if (pageTitleRetry.includes('Cloudflare') || pageTitleRetry.includes('Just a moment')) {
-                throw new Error("Acesso bloqueado pela proteção contra bots do Cloudflare.");
-              }
-              await logAgent(searchId, `[Cloudflare] Desafio de segurança superado com sucesso em ${source.name}!`, 'info');
-            }
+            await solveCloudflareChallengeIfNeeded(tempPage, searchId, source.name);
             
             let scraped = [];
             
@@ -1031,15 +1121,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
                 await simulateHumanInteraction(page);
                 
                 // Detecção ativa de Cloudflare
-                const pageTitle = await page.title();
-                if (pageTitle.includes('Cloudflare') || pageTitle.includes('Just a moment') || pageTitle.includes('Attention Required')) {
-                  await logAgent(searchId, `[Cloudflare] Desafio detectado na página de detalhes de ${candidate.title}. Aguardando desafio automático por 8s...`, 'warn');
-                  await new Promise(r => setTimeout(r, 8000));
-                  const pageTitleRetry = await page.title();
-                  if (pageTitleRetry.includes('Cloudflare') || pageTitleRetry.includes('Just a moment')) {
-                    throw new Error("Bloqueado pelo Cloudflare na página de detalhes.");
-                  }
-                }
+                await solveCloudflareChallengeIfNeeded(page, searchId, candidate.sourceName);
                 
                 detailData = await page.evaluate(() => {
                   const descEl = document.getElementById('torrent-description') || document.querySelector('.description') || document.querySelector('.panel-body') || document.querySelector('#description') || document.querySelector('.conteudo') || document.querySelector('.post-content');
@@ -1530,7 +1612,16 @@ function generateNextEpisodeKeywords(matchedTitles, attemptedKeywords) {
 
 // Testa a conexão com a API de IA
 async function testConnection(config) {
+  const logs = [];
+  const addLog = (msg) => {
+    const time = new Date().toLocaleTimeString('pt-BR', { hour12: false });
+    logs.push(`[${time}] ${msg}`);
+  };
+
   try {
+    addLog(`Iniciando teste de conexão para o provedor: "${config.aiProvider || 'openai'}"`);
+    addLog(`Modelo solicitado: "${config.aiModel || 'não especificado'}"`);
+    
     let endpoint = '';
     let headers = { 'Content-Type': 'application/json' };
     let body = {};
@@ -1542,6 +1633,11 @@ async function testConnection(config) {
         ? config.aiUrl 
         : (config.aiUrl.endsWith('/v1') ? `${config.aiUrl}/messages` : `${config.aiUrl}/v1/messages`);
         
+      const maskedToken = config.aiToken 
+        ? `${config.aiToken.substring(0, Math.min(8, config.aiToken.length))}...` 
+        : 'ausente';
+      addLog(`Preparando headers para Anthropic (x-api-key: ${maskedToken})`);
+      
       headers['x-api-key'] = config.aiToken;
       headers['anthropic-version'] = '2023-06-01';
       
@@ -1555,6 +1651,11 @@ async function testConnection(config) {
         ? config.aiUrl 
         : (config.aiUrl.endsWith('/v1') ? `${config.aiUrl}/chat/completions` : `${config.aiUrl}/v1/chat/completions`);
         
+      const maskedToken = config.aiToken 
+        ? `${config.aiToken.substring(0, Math.min(8, config.aiToken.length))}...` 
+        : 'ausente';
+      addLog(`Preparando headers para OpenAI/Compatível (Authorization: Bearer ${maskedToken})`);
+      
       headers['Authorization'] = `Bearer ${config.aiToken}`;
       
       body = {
@@ -1564,29 +1665,63 @@ async function testConnection(config) {
       };
     }
     
+    addLog(`Endpoint resolvido: POST ${endpoint}`);
+    addLog(`Payload a ser enviado: ${JSON.stringify(body)}`);
+    
+    addLog(`Enviando requisição HTTP...`);
+    const startTime = Date.now();
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(body)
     });
+    const duration = Date.now() - startTime;
+    addLog(`Resposta HTTP recebida em ${duration}ms com status: ${response.status} ${response.statusText}`);
     
     if (!response.ok) {
       const errorText = await response.text();
+      addLog(`Erro da API: HTTP ${response.status} - ${errorText}`);
       return {
         success: false,
-        error: `API respondeu com erro ${response.status}: ${errorText}`
+        error: `API respondeu com erro ${response.status}: ${errorText}`,
+        logs: logs
       };
     }
     
     const data = await response.json();
+    addLog(`Corpo da resposta parseado com sucesso.`);
+    addLog(`JSON retornado: ${JSON.stringify(data)}`);
+    
+    // Tenta extrair a mensagem de resposta
+    let textResponse = '';
+    if (config.aiProvider === 'anthropic') {
+      if (data.content && data.content[0] && data.content[0].text) {
+        textResponse = data.content[0].text;
+      }
+    } else {
+      if (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) {
+        textResponse = data.choices[0].message.content;
+      }
+    }
+    
+    if (textResponse) {
+      addLog(`Resposta do modelo extraída: "${textResponse}"`);
+    } else {
+      addLog(`Não foi possível extrair a resposta de texto de forma automática dos campos padrão.`);
+    }
+    
     return {
       success: true,
-      data: data
+      data: data,
+      responseText: textResponse,
+      logs: logs
     };
   } catch (err) {
+    addLog(`Erro capturado (exceção): ${err.message || String(err)}`);
     return {
       success: false,
-      error: err.message || String(err)
+      error: err.message || String(err),
+      logs: logs
     };
   }
 }
@@ -1595,6 +1730,7 @@ async function testConnection(config) {
 async function analyzeSearchSource(sourceOrId) {
   let source;
   let sourceId;
+  let hasPreExistingPattern = false;
   if (sourceOrId && typeof sourceOrId === 'object') {
     source = sourceOrId;
     sourceId = source.id !== undefined ? source.id : -1;
@@ -1605,6 +1741,7 @@ async function analyzeSearchSource(sourceOrId) {
       throw new Error(`Fonte de busca #${sourceId} não encontrada.`);
     }
   }
+  hasPreExistingPattern = !!(source && source.searchUrlPattern && source.searchUrlPattern.includes('{query}'));
 
   // Cancela análise anterior se houver
   if (activeOptimizations.has(sourceId)) {
@@ -1643,7 +1780,90 @@ async function analyzeSearchSource(sourceOrId) {
     
     // Configura disfarce humano na página
     await preparePageForHumanLikeBehavior(page);
-    
+
+    // Intercepta e aborta imagens e mídias para economizar banda e CPU em hardware de produção limitado
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'media'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+    // Passo A: Se o site já possui um padrão de busca cadastrado, faz uma busca de teste primeiro
+    if (hasPreExistingPattern) {
+      log(`Realizando busca de teste com o padrão existente para verificar se está funcional...`);
+      const testKeyword = '1080p';
+      const testSearchUrl = source.searchUrlPattern.replace('{query}', encodeURIComponent(testKeyword));
+      
+      try {
+        await page.goto(testSearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await solveCloudflareChallengeIfNeeded(page, sourceId, source.name, log);
+        await new Promise(r => setTimeout(r, 1500));
+        
+        let hasResults = false;
+        const isNyaa = source.name.toLowerCase().includes('nyaa') || source.url.includes('nyaa.si');
+        
+        if (isNyaa) {
+          hasResults = await page.evaluate(() => !!document.querySelector('table.torrent-list tbody tr'));
+        } else {
+          // Scraper genérico simplificado
+          const linkCount = await page.evaluate(() => {
+            const anchors = Array.from(document.querySelectorAll('a'));
+            return anchors.filter(a => {
+              const href = (a.getAttribute('href') || '').toLowerCase();
+              const text = a.innerText.toLowerCase();
+              const isTorrentLink = href.includes('.torrent') || href.startsWith('magnet:') || href.includes('/torrent/') || href.includes('/view/') || href.includes('/download/');
+              const isInternal = href.startsWith('/') || href.includes(window.location.hostname);
+              return (isTorrentLink || isInternal) && text.length > 2;
+            }).length;
+          });
+          hasResults = linkCount > 5; // Se achou mais de 5 links na página de resultados, assume que carregou conteúdo
+        }
+        
+        if (hasResults) {
+          log(`Sucesso: A busca de teste retornou resultados! O site "${source.name}" já está funcional com o padrão atual.`);
+          await page.close().catch(() => {});
+          await browser.close();
+          browser = null;
+          optState.browser = null;
+          
+          let contentTypesArr = [];
+          try {
+            contentTypesArr = JSON.parse(source.contentTypes);
+          } catch(e) {
+            contentTypesArr = ['movies', 'series'];
+          }
+          
+          // Reativa/mantém o site ativo no banco de dados
+          log(`Reativando/Mantendo o site "${source.name}" ativo, pois a busca de teste funcionou.`);
+          source.isActive = true;
+          if (typeof source.save === 'function') {
+            await source.save();
+          }
+          
+          return {
+            success: true,
+            analysis: {
+              success: true,
+              strategyType: 'query_url',
+              detectedPattern: source.searchUrlPattern,
+              explanation: "A busca de teste usando o padrão existente retornou resultados válidos. Nenhuma alteração é necessária.",
+              optimizedDescription: source.description || "Site de torrent indexado.",
+              contentTypes: contentTypesArr,
+              siteName: source.name,
+              isActive: true
+            }
+          };
+        } else {
+          log(`A busca de teste não retornou resultados conclusivos. Procedendo com a análise completa e simulação de busca...`);
+        }
+      } catch (testSearchErr) {
+        log(`Aviso: Falha na busca de teste (${testSearchErr.message}). Procedendo com análise completa da página inicial...`);
+      }
+    }
+
     log(`Navegando até a URL base: ${source.url}...`);
     checkAborted();
     
@@ -1660,17 +1880,8 @@ async function analyzeSearchSource(sourceOrId) {
     checkAborted();
 
     // Detecção ativa de Cloudflare
-    const pageTitle = await page.title();
-    if (pageTitle.includes('Cloudflare') || pageTitle.includes('Just a moment') || pageTitle.includes('Attention Required')) {
-      log("Alerta: Desafio/CAPTCHA do Cloudflare detectado! Aguardando 8 segundos para resolução automática...");
-      await new Promise(r => setTimeout(r, 8000));
-      checkAborted();
-      const pageTitleRetry = await page.title();
-      if (pageTitleRetry.includes('Cloudflare') || pageTitleRetry.includes('Just a moment')) {
-        throw new Error("Acesso bloqueado pela proteção contra bots do Cloudflare (desafio automático falhou).");
-      }
-      log("Sucesso: Desafio de segurança do Cloudflare superado!");
-    }
+    await solveCloudflareChallengeIfNeeded(page, sourceId, source.name, log);
+    checkAborted();
 
     log("Acessado com sucesso. Avaliando estrutura da página (DOM)...");
     
@@ -1844,6 +2055,7 @@ Considere:
 2. Se o padrão atual já está correto ou se há um melhor/mais limpo.
 3. Se há alguma indicação de API de busca.
 4. Se o site requer navegação complexa (ex: SPA).
+5. Se o site já possui uma estratégia funcional ("${source.searchUrlPattern}") e não há indicação clara de uma rota melhor/mais moderna, você PODE e DEVE sugerir manter a estratégia atual (retornando a mesma URL no "detectedPattern" e definindo "strategyType" correspondente, ex: "query_url" ou "api_route").
 
 Responda em formato JSON, com as seguintes chaves:
 - "success": true/false (se a análise foi bem-sucedida)
@@ -1912,7 +2124,7 @@ Responda APENAS com o objeto JSON válido, sem qualquer bloco de código markdow
     
     log(`Análise de IA concluída com sucesso! Nova estratégia proposta: ${normalized.detectedPattern}`);
     
-    if (normalized.strategyType === 'unknown') {
+    if (normalized.strategyType === 'unknown' && !hasPreExistingPattern) {
       log(`Nenhum método de busca encontrado (estratégia 'unknown'). Desativando o site automaticamente.`);
       source.isActive = false;
       if (typeof source.save === 'function') {
@@ -1920,7 +2132,19 @@ Responda APENAS com o objeto JSON válido, sem qualquer bloco de código markdow
       }
       normalized.isActive = false;
     } else {
-      normalized.isActive = source.isActive;
+      if (normalized.strategyType === 'unknown' && hasPreExistingPattern) {
+        log(`Aviso: A IA retornou estratégia 'unknown' para "${source.name}", mas o padrão de busca pré-existente foi preservado: "${source.searchUrlPattern}".`);
+        normalized.detectedPattern = source.searchUrlPattern;
+        normalized.strategyType = 'query_url';
+      }
+      
+      // Como a análise de busca foi bem-sucedida (o site respondeu e foi analisado), reativa ele!
+      log(`Reativando/Mantendo o site "${source.name}" ativo, pois a análise de busca foi bem-sucedida.`);
+      source.isActive = true;
+      if (typeof source.save === 'function') {
+        await source.save();
+      }
+      normalized.isActive = true;
     }
     
     return {
@@ -1935,14 +2159,19 @@ Responda APENAS com o objeto JSON válido, sem qualquer bloco de código markdow
     }
     
     // Desativa o site em caso de falha crítica de conexão / análise
+    // APENAS se ele não tiver um padrão de URL de busca previamente cadastrado!
     try {
-      log(`Desativando o site "${source.name}" automaticamente devido à impossibilidade de realizar buscas.`);
-      source.isActive = false;
-      if (typeof source.save === 'function') {
-        await source.save();
+      if (!hasPreExistingPattern) {
+        log(`Desativando o site "${source.name}" automaticamente devido à impossibilidade de realizar buscas e ausência de padrão pré-existente.`);
+        source.isActive = false;
+        if (typeof source.save === 'function') {
+          await source.save();
+        }
+      } else {
+        log(`Aviso: Falha na análise do site "${source.name}", mas o padrão pré-existente ("${source.searchUrlPattern}") foi mantido e o site continuará ativo.`);
       }
     } catch (saveErr) {
-      log(`Erro ao desativar site no banco: ${saveErr.message}`);
+      log(`Erro ao atualizar status do site no banco: ${saveErr.message}`);
     }
     
     let errorMsg = err.message || String(err);
