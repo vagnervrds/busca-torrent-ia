@@ -28,7 +28,7 @@ async function getSettings() {
   return {
     aiProvider: settings.aiProvider || 'openai',
     aiUrl: settings.aiUrl || 'http://localhost:8045/v1',
-    aiToken: settings.aiToken || 'SUA_API_KEY_AQUI',
+    aiToken: settings.aiToken || process.env.AI_TOKEN || '',
     aiModel: settings.aiModel || 'gemini-3-flash',
     preferredLanguage: settings.preferredLanguage || 'Português',
     preferredResolution: settings.preferredResolution || '1080p'

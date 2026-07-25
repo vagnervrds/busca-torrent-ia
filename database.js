@@ -278,7 +278,7 @@ async function initDatabase() {
   const defaultSettings = [
     { key: 'aiProvider', value: 'openai' },
     { key: 'aiUrl', value: 'http://localhost:8045/v1' },
-    { key: 'aiToken', value: 'SUA_API_KEY_AQUI' },
+    { key: 'aiToken', value: '' },
     { key: 'aiModel', value: 'gemini-3-flash' },
     { key: 'preferredLanguage', value: 'Português' },
     { key: 'preferredResolution', value: '1080p' }
