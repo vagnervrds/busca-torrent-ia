@@ -1,25 +1,37 @@
 # Busca Torrent IA 🤖 🎬
 
-O **Busca Torrent IA** é um agente inteligente e automatizado que utiliza Inteligência Artificial, Puppeteer e SQLite para buscar, analisar e gerenciar downloads de torrents de forma autônoma.
+O **Busca Torrent IA** (T-Hunter AI) é um agente inteligente e automatizado que utiliza Inteligência Artificial, Puppeteer e SQLite para buscar, analisar e gerenciar downloads de torrents de forma autônoma.
 
 Ele foi projetado para rodar em servidores (como DietPi, Raspberry Pi, VPS ou localmente) e automatizar o processo de encontrar o melhor torrent para o seu gosto (idioma, resolução) e enviá-lo diretamente para o seu cliente de torrent.
+
+---
 
 ## 🚀 Funcionalidades Principais
 
 - **Busca Automatizada com Puppeteer:** Navega em sites de torrent simulando comportamento humano e burlando proteções contra bots utilizando o `puppeteer-extra-plugin-stealth`.
-- **Avaliação Inteligente com IA:** Integra-se com modelos de IA (OpenAI, Gemini, etc.) para analisar os resultados extraídos e escolher a melhor opção com base nas suas preferências (ex: dublado em Português, resolução 1080p, etc).
-- **Integração Direta com o Deluge:** Detecta automaticamente as credenciais do Deluge rodando localmente (ou via configuração) e adiciona os torrents aprovados diretamente para a fila de download.
-- **Interface Web em Tempo Real (SSE):** Acompanhe o progresso do agente, o status das buscas e os logs de decisão da IA ao vivo através de uma interface web responsiva utilizando Server-Sent Events.
-- **Gerenciamento de Fila de Buscas:** Organiza as buscas de forma sequencial para não sobrecarregar o hardware do servidor, otimizando o uso de CPU e RAM.
-- **Sistema de Cache (Stale-While-Revalidate):** Otimiza a comunicação entre o banco de dados e o frontend, garantindo que a interface permaneça rápida e fluida mesmo com histórico longo.
-- **Monitoramento de Armazenamento:** Conta com uma página dedicada à verificação de disco/armazenamento do servidor.
+- **Avaliação Inteligente com IA:** Integra-se com modelos de IA (OpenAI, Gemini, etc.) para analisar os resultados extraídos e escolher a melhor opção com base nas suas preferências (ex: resolução 1080p, 4K, etc).
+- **Filtro Avançado "Somente Dublado":** Suporte aprimorado para áudio em Português-BR. Quando configurado como "somente dublado", o classificador prioriza títulos em português, o avaliador da IA realiza checagem rigorosa de áudio PT-BR (desconsiderando rótulos genéricos de "Dual Áudio" sem comprovação de idioma) e o gerente de qualidade mantém a busca ativa até que um arquivo com áudio dublado seja confirmado.
+- **Integração Direta com o Deluge:** Detecta automaticamente as credenciais do Deluge rodando localmente (ou via configuração) e adiciona os torrents aprovados diretamente para a fila de download, invalidando caches relacionados para atualização imediata.
+- **Interface Web em Tempo Real (SSE Global):** Acompanhe o progresso do agente, status das buscas e logs de decisão da IA ao vivo. Conta com um canal SSE global que sincroniza o histórico, badges e contadores da barra lateral instantaneamente para todos os clientes conectados.
+- **Gerenciador de Armazenamento Redesenhado:** Página administrativa redesenhada com Tailwind CSS sob uma estética moderna e limpa, oferecendo:
+  - **Navegador de Arquivos:** Tabela interativa para navegar pelas pastas de downloads do Deluge com suporte a breadcrumbs dinâmicos (compatível com Linux e Windows).
+  - **Visualização de Blocos:** Gráfico interativo Treemap (ECharts) para localizar arquivos grandes visualmente.
+  - **Exclusão Física em Lote:** Permite selecionar múltiplos arquivos/pastas simultaneamente por meio de checkboxes para exclusão definitiva do disco com modal de confirmação detalhado.
+  - **Barra de Espaço em Disco:** Exibição em tempo real do espaço ocupado por downloads do T-Hunter, outros arquivos e espaço livre.
+- **Resiliência e Retomada Automática:** Após reiniciar o servidor, o sistema agenda para 60 segundos uma retomada automática de todas as buscas pendentes ou não concluídas no banco de dados, enfileirando-as por ordem de recência.
+- **Controle de Processo Remoto:** Botões dedicados nas configurações para reiniciar ou desligar o servidor Node.js de forma segura com área de exibição de logs de falha na própria UI.
+- **Cache SWR (Stale-While-Revalidate) de Alta Performance:** Otimização de cache no servidor (evitando queries lentas de contagem e revalidando chaves em background de forma assíncrona) combinada com cache local (`localStorage`) no navegador para carregamento imediato de buscas e status.
+
+---
 
 ## 🛠️ Tecnologias Utilizadas
 
-- **Backend:** Node.js, Express
+- **Backend:** Node.js, Express, Worker Threads (mapeamento paralelo de arquivos)
 - **Automação/Scraping:** Puppeteer, Puppeteer Stealth
 - **Banco de Dados:** SQLite3 com ORM Sequelize
-- **Frontend:** HTML, CSS e Vanilla JS
+- **Frontend:** HTML, Vanilla JS, Tailwind CSS, Phosphor Icons, ECharts (gráficos dinâmicos)
+
+---
 
 ## 📦 Instalação e Execução
 
@@ -36,6 +48,8 @@ npm start
 O servidor será iniciado por padrão na porta `4182` (ou na porta definida em seu ambiente).  
 Acesse a interface pelo navegador: `http://localhost:4182`
 
+---
+
 ## 🐧 Pré-requisitos Específicos para Linux (VPS/WSL/DietPi)
 
 Caso esteja rodando o agente em um ambiente Linux puramente terminal e encontre erros relacionados à inicialização do navegador Chrome do Puppeteer (como `libgobject-2.0.so.0 is missing`), você precisa instalar as dependências essenciais de interface gráfica do sistema.
@@ -47,6 +61,8 @@ sudo apt-get update && sudo apt-get install -y libglib2.0-0 libnss3 libnspr4 lib
 ```
 
 > **Nota:** O sistema é inteligente o suficiente para tentar detectar o binário do Chromium nativo do sistema operacional (como em distribuições DietPi/ARM) caso o navegador interno do Puppeteer não funcione.
+
+---
 
 ## 🔄 Rodando em Background com PM2
 
@@ -73,6 +89,8 @@ pm2 save
 ```bash
 pm2 logs busca-torrent-ia
 ```
+
+---
 
 ## ⚠️ Isenção de Responsabilidade
 

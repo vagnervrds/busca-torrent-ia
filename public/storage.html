@@ -1,91 +1,253 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-BR" class="dark">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Armazenamento - WizTree IA</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="storage.css">
-    <!-- ECharts -->
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Armazenamento - T-Hunter AI</title>
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Tailwind Config -->
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            heading: ['Outfit', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#f5f3ff',
+              100: '#ede9fe',
+              500: '#8b5cf6',
+              600: '#7c3aed',
+              700: '#6d28d9',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  
+  <!-- Phosphor Icons -->
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  <!-- Font Awesome CDN -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Custom CSS for ECharts sizing & scrollbar -->
+  <link rel="stylesheet" href="storage.css">
+  
+  <!-- ECharts -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 </head>
-<body>
-    <div class="app-container">
-        <!-- Sidebar Navigation (mimicking the main app, simplified) -->
-        <aside class="sidebar glass-panel">
-            <div class="logo-area">
-                <i class="fa-solid fa-server pulse-icon"></i>
-                <h1>Target<span class="highlight">Sync</span></h1>
-            </div>
-            <nav class="main-nav">
-                <a href="/" class="nav-item">
-                    <i class="fa-solid fa-magnifying-glass"></i> Busca
-                </a>
-                <a href="/storage" class="nav-item active">
-                    <i class="fa-solid fa-hard-drive"></i> Armazenamento
-                </a>
-            </nav>
-        </aside>
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans transition-colors duration-300 min-h-screen flex flex-col md:flex-row overflow-hidden">
 
-        <!-- Main Content -->
-        <main class="main-content">
-            <header class="top-header glass-panel">
-                <div class="header-titles">
-                    <h2>Gerenciador de Armazenamento</h2>
-                    <p class="subtitle">Descubra e apague arquivos grandes facilmente.</p>
-                </div>
-                <div class="header-actions">
-                    <button id="btn-discover" class="btn-primary">
-                        <i class="fa-solid fa-radar"></i> Redescobrir Caminho
-                    </button>
-                    <button id="btn-refresh" class="btn-secondary">
-                        <i class="fa-solid fa-rotate-right"></i> Atualizar Gráfico
-                    </button>
-                </div>
-            </header>
-
-            <div class="storage-workspace glass-panel">
-                <div id="loading-overlay" class="loading-overlay">
-                    <div class="spinner"></div>
-                    <h3 id="loading-text">Analisando armazenamento no servidor...</h3>
-                    <p>Isso pode levar alguns segundos dependendo da quantidade de arquivos.</p>
-                </div>
-                
-                <div id="path-not-found" class="error-overlay hidden">
-                    <i class="fa-solid fa-triangle-exclamation"></i>
-                    <h3>Caminho do Deluge Desconhecido</h3>
-                    <p>Precisamos descobrir onde seus downloads são salvos antes de gerar o gráfico.</p>
-                    <button id="btn-discover-overlay" class="btn-primary mt-3">
-                        Descobrir Agora
-                    </button>
-                </div>
-
-                <div id="treemap-container" class="chart-container"></div>
-            </div>
-        </main>
-    </div>
-
-    <!-- Context Modal / Selected Item Panel -->
-    <div id="item-panel" class="item-panel hidden glass-panel">
-        <button id="close-panel" class="btn-close"><i class="fa-solid fa-xmark"></i></button>
-        <h3 id="item-name" class="item-name">Nome do Arquivo</h3>
-        <p id="item-path" class="item-path">/caminho/completo</p>
-        <div class="item-stats">
-            <div class="stat-box">
-                <span class="stat-label">Tamanho</span>
-                <span id="item-size" class="stat-value">0 MB</span>
-            </div>
-            <div class="stat-box">
-                <span class="stat-label">Tipo</span>
-                <span id="item-type" class="stat-value">Arquivo</span>
-            </div>
+  <!-- BARRA LATERAL (Sidebar) -->
+  <aside id="sidebar" class="w-full md:w-64 bg-white dark:bg-slate-900 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 flex flex-col flex-shrink-0 md:h-screen">
+    <!-- Header Logo -->
+    <div class="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="bg-gradient-to-tr from-brand-600 to-indigo-500 text-white p-2.5 rounded-xl shadow-lg shadow-brand-500/20">
+          <i class="ph-bold ph-magnet-straight text-xl"></i>
         </div>
-        <button id="btn-delete" class="btn-danger">
-            <i class="fa-solid fa-trash-can"></i> Apagar Definitivamente
-        </button>
+        <div>
+          <h1 class="font-extrabold text-lg tracking-tight bg-gradient-to-r from-brand-500 to-indigo-400 bg-clip-text text-transparent">T-Hunter AI</h1>
+          <p class="text-[10px] text-slate-400 dark:text-slate-500 font-medium uppercase tracking-wider">Busca de Torrent</p>
+        </div>
+      </div>
     </div>
 
-    <script src="storage.js"></script>
+    <!-- Navegação -->
+    <nav class="flex-1 p-4 space-y-1 overflow-y-auto">
+      <a href="/" class="flex items-center gap-3 px-4 py-3 text-sm font-semibold rounded-xl text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-950 hover:text-slate-900 dark:hover:text-slate-100 transition-all">
+        <i class="ph-bold ph-magnifying-glass text-lg"></i>
+        <span>Busca Inteligente</span>
+      </a>
+      <a href="/storage" class="flex items-center gap-3 px-4 py-3 text-sm font-bold rounded-xl bg-brand-550/10 dark:bg-brand-950/30 text-brand-600 dark:text-brand-400 border border-brand-100/50 dark:border-brand-900/30 shadow-sm shadow-brand-500/5 transition-all">
+        <i class="ph-bold ph-hard-drive text-lg"></i>
+        <span>Armazenamento</span>
+      </a>
+    </nav>
+  </aside>
+
+  <!-- CONTEÚDO PRINCIPAL -->
+  <main class="flex-1 flex flex-col h-screen overflow-hidden p-4 md:p-6 gap-4 md:gap-6 min-w-0">
+    
+    <!-- HEADER DA PÁGINA -->
+    <header class="bg-white dark:bg-slate-900 p-4 md:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+      <div>
+        <h2 class="font-heading font-extrabold text-xl md:text-2xl text-slate-800 dark:text-slate-100">Gerenciador de Armazenamento</h2>
+        <p class="text-xs md:text-sm text-slate-400 dark:text-slate-500 font-medium">Visualize o uso do seu disco e apague arquivos grandes facilmente.</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <!-- View Switcher Tabs -->
+        <div class="flex bg-slate-100 dark:bg-slate-850 p-0.5 rounded-xl border border-slate-200/50 dark:border-slate-800/40 mr-2">
+          <button id="btn-view-manager" class="py-1.5 px-3 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-bold rounded-lg text-xs transition-all shadow-sm flex items-center gap-1.5 focus:outline-none">
+            <i class="ph-bold ph-folder-open text-sm"></i> Navegador
+          </button>
+          <button id="btn-view-blocks" class="py-1.5 px-3 text-slate-400 dark:text-slate-500 font-semibold rounded-lg text-xs transition-all flex items-center gap-1.5 focus:outline-none">
+            <i class="ph-bold ph-chart-square-bar text-sm"></i> Blocos
+          </button>
+        </div>
+        
+        <button id="btn-discover" class="py-2 px-3 bg-slate-100 hover:bg-slate-202 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs border border-slate-200/50 dark:border-slate-700/50 transition-all flex items-center gap-1.5 focus:outline-none">
+          <i class="ph-bold ph-radar text-sm"></i> Redescobrir
+        </button>
+        <button id="btn-refresh" class="py-2 px-3 bg-slate-100 hover:bg-slate-202 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs border border-slate-200/50 dark:border-slate-700/50 transition-all flex items-center gap-1.5 focus:outline-none">
+          <i class="ph-bold ph-arrows-clockwise text-sm"></i> Atualizar
+        </button>
+      </div>
+    </header>
+
+    <!-- BARRA DE ESPAÇO EM DISCO -->
+    <section class="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col gap-2.5">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between text-xs font-semibold text-slate-400 dark:text-slate-500 gap-2">
+        <div class="flex flex-wrap gap-x-4 gap-y-1.5">
+          <span class="flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-full bg-brand-500 inline-block"></span> 
+            Downloads T-Hunter: <span id="disk-thunter-text" class="text-slate-700 dark:text-slate-300">Carregando...</span>
+          </span>
+          <span class="flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-full bg-slate-400 dark:bg-slate-600 inline-block"></span> 
+            Outros Arquivos: <span id="disk-others-text" class="text-slate-700 dark:text-slate-300">Carregando...</span>
+          </span>
+          <span class="flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span> 
+            Espaço Livre: <span id="disk-free-text" class="text-slate-700 dark:text-slate-300">Carregando...</span>
+          </span>
+        </div>
+        <div>
+          Total do Disco: <span id="disk-total-text" class="text-slate-700 dark:text-slate-300">0 GB</span>
+        </div>
+      </div>
+      <div class="w-full h-3 bg-slate-100 dark:bg-slate-950 rounded-full overflow-hidden flex">
+        <div id="bar-thunter" class="h-full bg-brand-500 transition-all duration-500" style="width: 0%"></div>
+        <div id="bar-others" class="h-full bg-slate-300 dark:bg-slate-700 transition-all duration-500" style="width: 0%"></div>
+        <div id="bar-free" class="h-full bg-emerald-500 transition-all duration-500" style="width: 0%"></div>
+      </div>
+    </section>
+
+    <!-- ÁREA DE CONTEÚDO (WORKSPACE) -->
+    <div class="flex-1 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm relative overflow-hidden flex flex-col min-h-0">
+      
+      <!-- Overlay de Loading -->
+      <div id="loading-overlay" class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm z-30 flex flex-col items-center justify-center p-6 text-center transition-all duration-300">
+        <div class="w-10 h-10 border-2 border-brand-500/20 border-t-brand-500 rounded-full animate-spin mb-4"></div>
+        <h3 id="loading-text" class="font-heading font-bold text-lg text-slate-100 mb-1">Analisando armazenamento...</h3>
+        <p class="text-xs text-slate-400 max-w-xs">Isso pode levar alguns segundos dependendo do número de arquivos no disco.</p>
+      </div>
+      
+      <!-- Overlay de Erro / Sem Caminho -->
+      <div id="path-not-found" class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm z-30 flex flex-col items-center justify-center p-6 text-center hidden">
+        <i class="ph-bold ph-warning-octagon text-amber-500 text-4xl mb-4"></i>
+        <h3 class="font-heading font-bold text-lg text-slate-100 mb-1">Caminho de Downloads não Definido</h3>
+        <p class="text-xs text-slate-400 max-w-sm mb-4">Precisamos descobrir onde seus downloads são salvos antes de analisar o armazenamento.</p>
+        <button id="btn-discover-overlay" class="py-2.5 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs shadow-md transition-all">
+          Descobrir Agora
+        </button>
+      </div>
+
+      <!-- VIEW 1: GERENCIADOR DE ARQUIVOS (Default) -->
+      <div id="file-manager-view" class="flex-1 flex flex-col min-h-0">
+        <!-- Navegação / Breadcrumbs -->
+        <div class="p-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3 overflow-hidden flex-1">
+            <button id="btn-go-back" type="button" class="py-1 px-2.5 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-750 dark:text-slate-300 font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 focus:outline-none hidden flex-shrink-0">
+              <i class="ph-bold ph-arrow-left text-sm"></i> Voltar
+            </button>
+            <div id="breadcrumbs-container" class="flex items-center gap-1 text-xs md:text-sm font-semibold overflow-x-auto whitespace-nowrap scrollbar-none">
+              <span class="text-slate-400">Carregando caminhos...</span>
+            </div>
+          </div>
+          <button id="btn-delete-selected" type="button" class="py-1.5 px-3 bg-red-605 hover:bg-red-700 text-white font-bold rounded-xl text-xs shadow-md transition-all flex items-center gap-1.5 focus:outline-none hidden flex-shrink-0">
+            <i class="ph-bold ph-trash text-sm"></i> Excluir Selecionados (<span id="selected-count">0</span>)
+          </button>
+        </div>
+        
+        <!-- Tabela de Itens -->
+        <div class="flex-1 overflow-y-auto">
+          <table class="w-full text-left border-collapse text-slate-700 dark:text-slate-350">
+            <thead>
+              <tr class="border-b border-slate-100 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-900/30 text-slate-400 dark:text-slate-500 font-bold text-xs uppercase tracking-wider">
+                <th class="py-3 px-4 w-10">
+                  <input type="checkbox" id="checkbox-select-all" class="w-4 h-4 rounded border-slate-300 dark:border-slate-700 text-brand-600 focus:ring-brand-500 bg-slate-50 dark:bg-slate-950 dark:border-slate-800">
+                </th>
+                <th class="py-3 px-4">Nome</th>
+                <th class="py-3 px-4 text-right w-28 md:w-36">Tamanho</th>
+                <th class="py-3 px-4 text-right w-16 md:w-20">Ações</th>
+              </tr>
+            </thead>
+            <tbody id="file-list-body" class="divide-y divide-slate-100 dark:divide-slate-800">
+              <!-- Renderizado via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- VIEW 2: MAPA DE BLOCOS (TREEMAP ECHARTS) -->
+      <div id="treemap-view" class="flex-1 w-full h-full hidden relative min-h-0">
+        <div id="treemap-container" class="w-full h-full absolute inset-0"></div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- PANEL FLUTUANTE DE DETALHE DE BLOCOS (ECHARTS CONTEXT PANEL) -->
+  <div id="item-panel" class="fixed bottom-4 right-4 w-[320px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl shadow-xl z-45 flex flex-col gap-4 transform translate-y-[150%] transition-all duration-300 ease-out hidden">
+    <button id="close-panel" class="absolute top-4 right-4 text-slate-400 hover:text-slate-750 dark:hover:text-slate-200 transition-colors focus:outline-none">
+      <i class="ph-bold ph-x text-lg"></i>
+    </button>
+    <div>
+      <h3 id="item-name" class="font-heading font-bold text-base text-slate-800 dark:text-slate-100 truncate pr-6">Nome do Item</h3>
+      <p id="item-path" class="text-[10px] text-slate-400 dark:text-slate-500 break-all font-medium mt-1">/caminho/completo</p>
+    </div>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="bg-slate-50 dark:bg-slate-950 p-2.5 rounded-xl border border-slate-200/50 dark:border-slate-800/40">
+        <span class="block text-[10px] text-slate-400 uppercase tracking-wider font-bold">Tamanho</span>
+        <span id="item-size" class="font-heading font-extrabold text-sm text-slate-800 dark:text-slate-200">0 MB</span>
+      </div>
+      <div class="bg-slate-50 dark:bg-slate-950 p-2.5 rounded-xl border border-slate-200/50 dark:border-slate-800/40">
+        <span class="block text-[10px] text-slate-400 uppercase tracking-wider font-bold">Tipo</span>
+        <span id="item-type" class="font-heading font-extrabold text-sm text-slate-800 dark:text-slate-200">Pasta</span>
+      </div>
+    </div>
+    <button id="btn-delete" class="w-full py-2.5 px-4 bg-red-650 hover:bg-red-750 text-white font-bold rounded-xl text-xs shadow-md shadow-red-500/10 hover:shadow-lg transition-all flex items-center justify-center gap-1.5 focus:outline-none">
+      <i class="ph-bold ph-trash text-sm"></i> Apagar Definitivamente
+    </button>
+  </div>
+
+  <!-- Modal de Confirmação de Deleção -->
+  <div id="delete-confirm-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all duration-300 hidden">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md shadow-2xl p-6 flex flex-col gap-4 transform scale-95 transition-all duration-300">
+      <div class="flex items-center gap-3 text-red-500">
+        <i class="ph-bold ph-warning-octagon text-3xl"></i>
+        <h3 class="font-heading font-extrabold text-lg text-slate-850 dark:text-slate-100">Excluir Definitivamente?</h3>
+      </div>
+      <p class="text-xs text-slate-500 dark:text-slate-400 font-medium">Você tem certeza que deseja excluir permanentemente o(s) seguinte(s) item(ns)? Esta ação é irreversível e os arquivos serão apagados do disco.</p>
+      
+      <div id="delete-modal-list" class="max-h-40 overflow-y-auto border border-slate-150 dark:border-slate-800 rounded-xl p-3 bg-slate-50 dark:bg-slate-950/50 space-y-1.5 text-xs text-slate-600 dark:text-slate-400">
+        <!-- List of items to be deleted -->
+      </div>
+
+      <div class="flex items-center justify-end gap-2.5 mt-2">
+        <button id="btn-delete-cancel" type="button" class="py-2 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors focus:outline-none flex-none w-auto">
+          Cancelar
+        </button>
+        <button id="btn-delete-confirm" type="button" class="py-2 px-4 bg-red-600 hover:bg-red-750 text-white font-bold rounded-xl text-xs shadow-md transition-all focus:outline-none flex-none w-auto">
+          Confirmar Exclusão
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="storage.js"></script>
 </body>
 </html>

@@ -577,6 +577,49 @@ async function stopSearchAgent(searchId) {
   }
 }
 
+// Interrompe todas as buscas ativas e pendentes, e fecha todos os navegadores abertos (buscas e análises)
+async function stopAllSearchAgents() {
+  // Limpa a fila de processamento
+  searchQueue.length = 0;
+  
+  // Copia as chaves das buscas ativas para evitar problemas de concorrência na iteração
+  const activeIds = Array.from(activeSearches.keys());
+  for (const searchId of activeIds) {
+    try {
+      await stopSearchAgent(searchId);
+    } catch (err) {
+      console.error(`Erro ao parar busca #${searchId} no stopAllSearchAgents:`, err.message);
+    }
+  }
+
+  // Cancela análises de fontes ativas
+  const activeOptIds = Array.from(activeOptimizations.keys());
+  for (const sourceId of activeOptIds) {
+    try {
+      await cancelSearchSourceAnalysis(sourceId);
+    } catch (err) {
+      console.error(`Erro ao cancelar análise da fonte #${sourceId} no stopAllSearchAgents:`, err.message);
+    }
+  }
+
+  // Atualiza no banco de dados todas as buscas pendentes/buscando para paradas
+  try {
+    const [affectedCount] = await Search.update(
+      { status: 'stopped' },
+      { 
+        where: { 
+          status: ['searching', 'pending'] 
+        } 
+      }
+    );
+    if (affectedCount > 0) {
+      console.log(`[stopAllSearchAgents] Forçadas ${affectedCount} buscas para status 'stopped' no banco.`);
+    }
+  } catch (err) {
+    console.error("Erro ao atualizar buscas para stopped no banco:", err);
+  }
+}
+
 // Enfileira uma busca para execução sequencial
 function enqueueSearch(searchId, resumeMode) {
   if (!searchQueue.some(item => item.searchId === searchId)) {
@@ -1042,10 +1085,11 @@ async function runSearchAgent(searchId, resumeMode = true) {
             
             const titlesList = batch.map((t, idx) => ({ index: idx, title: t.title, seeders: t.seeders, size: t.size, source: t.sourceName }));
             
+            const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
             const filterPrompt = [
               {
                 role: "system",
-                content: "Você é um classificador de relevância de arquivos de torrent."
+                content: `Você é um classificador de relevância de arquivos de torrent.${isSomenteDublado ? ' ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"): O usuário quer apenas conteúdo com áudio em Português. Selecione preferencialmente torrents que pareçam conter áudio em português (ex: contendo "dublado", "dual audio", "PT-BR" no título). Na dúvida se o áudio correto está presente, selecione o índice para que possamos inspecioná-lo de forma profunda (analisando os arquivos e descrição internos).' : ''}`
               },
               {
                 role: "user",
@@ -1185,10 +1229,16 @@ async function runSearchAgent(searchId, resumeMode = true) {
               
               await logAgent(searchId, `Encontrado(s) ${magnetsToEvaluate.length} link(s) magnet na página de "${candidate.title}". Enviando para avaliação da IA...`, 'info');
               
+              const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
               const evaluationPrompt = [
                 {
                   role: "system",
-                  content: `Você é um avaliador inteligente de torrents. Você deve analisar uma página de detalhes de torrent e seus múltiplos links magnet para classificar e selecionar quais links individuais correspondem à busca e preferências do usuário.`
+                  content: `Você é um avaliador inteligente de torrents. Você deve analisar uma página de detalhes de torrent e seus múltiplos links magnet para classificar e selecionar quais links individuais correspondem à busca e preferências do usuário.
+${isSomenteDublado ? `
+ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
+- O usuário especificou que deseja apenas conteúdo DUBLADO (áudio em Português-BR).
+- Você deve ter certeza de que o áudio do vídeo está em Português. NÃO aceite o termo genérico "Dual Áudio" ou "Dual-Audio" isoladamente no título ou descrição como prova de áudio em português, pois ele pode se referir a outras línguas (ex: Inglês e Japonês). Procure por indícios explícitos de áudio em português (como "dublado", "PT-BR", "Português", "pob", "pt-br", arquivos contendo "por", "pt", "dub", "portuguese" no nome ou nas especificações de áudio na descrição).
+- Se houver dúvida se o áudio em português está realmente presente (ex: diz "Dual Áudio" ou "Multi-áudio" sem listar os idiomas específicos, mas há uma chance razoável por ser de tracker/grupo brasileiro), adicione o torrent à lista de correspondências (matches = true), mas marque "hasPortugueseAudio" como false no JSON para sinalizar que o áudio em português não está garantido. Isso permitirá que o sistema adicione o torrent na lista mas continue procurando por versões com o áudio correto 100% confirmado.` : ''}`
                 },
                 {
                   role: "user",
@@ -1340,7 +1390,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
             }
           }
         } else {
-          // Caso não haja palavras-chave de sequências programáticas, chama o LLM normal com histórico
+          const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
           const variationPrompt = [
             {
               role: "system",
@@ -1351,6 +1401,10 @@ async function runSearchAgent(searchId, resumeMode = true) {
               content: `O usuário quer encontrar torrents que correspondam a: "${search.query}".
               Idioma Preferido: "${config.preferredLanguage}"
               Resolução Preferida: "${config.preferredResolution}"
+              ${isSomenteDublado ? `
+              ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
+              - O usuário quer encontrar apenas versões com áudio em Português-BR.
+              - NÃO sugira termos genéricos como "dual audio" ou "dual-audio" nas novas palavras-chave de busca. Em vez disso, prefira sugerir o título original/limpo (muitos trackers indexam dual-áudio sob o título original) ou variações contendo termos explícitos como "dublado", "portugues" ou "pt-br".` : ''}
               
               Já tentamos realizar buscas com as seguintes palavras-chave, mas elas não resultaram em resultados satisfatórios ou compatíveis:
               ${JSON.stringify(attemptedKeywords)}
@@ -1468,10 +1522,15 @@ async function checkSearchCompletion(searchId, searchModel, browserInstance, con
     hasPortugueseSubtitles: r.hasPortugueseSubtitles
   }));
   
+  const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
   const completionPrompt = [
     {
       role: "system",
-      content: "Você é um gerente de qualidade de busca e torrents. Analise se os resultados obtidos até agora satisfazem o termo de pesquisa original do usuário."
+      content: `Você é um gerente de qualidade de busca e torrents. Analise se os resultados obtidos até agora satisfazem o termo de pesquisa original do usuário.
+${isSomenteDublado ? `
+ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
+- O objetivo principal é obter arquivos com áudio em Português (hasPortugueseAudio = true).
+- Se todos os resultados encontrados até o momento tiverem hasPortugueseAudio = false (apenas legendados ou em outro idioma), a busca NÃO deve ser marcada como completada (completed = false), para que a busca em background continue tentando outras variações, a menos que tenhamos exaurido totalmente as tentativas.` : ''}`
     },
     {
       role: "user",
@@ -2213,6 +2272,7 @@ async function cancelSearchSourceAnalysis(sourceId) {
 module.exports = {
   enqueueSearch,
   stopSearchAgent,
+  stopAllSearchAgents,
   testConnection,
   analyzeSearchSource,
   cancelSearchSourceAnalysis,

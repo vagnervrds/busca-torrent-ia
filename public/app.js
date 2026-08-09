@@ -7,6 +7,7 @@ let activeSearchId = null;
 let activeSearchData = { results: [], logs: [] };
 
 let eventSource = null;
+let globalEventSource = null;
 
 let searchSources = [];
 
@@ -28,6 +29,10 @@ const sidebar = document.getElementById('sidebar');
 const searchesList = document.getElementById('searchesList');
 
 const newSearchBtn = document.getElementById('newSearchBtn');
+
+const stopAllSearchesBtn = document.getElementById('stopAllSearchesBtn');
+
+const restartAllSearchesBtn = document.getElementById('restartAllSearchesBtn');
 
 const sidebarSettingsBtn = document.getElementById('sidebarSettingsBtn');
 
@@ -274,6 +279,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Carrega buscas iniciais
 
   fetchSearches();
+  connectGlobalSSE();
 
   checkDelugeStatus();
 
@@ -312,6 +318,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 100);
   });
 
+  if (stopAllSearchesBtn) {
+    stopAllSearchesBtn.addEventListener('click', handleStopAllSearches);
+  }
+
+  if (restartAllSearchesBtn) {
+    restartAllSearchesBtn.addEventListener('click', handleRestartAllSearches);
+  }
+
   sidebarSettingsBtn.addEventListener('click', showSettingsSection);
 
   searchForm.addEventListener('submit', handleSearchSubmit);
@@ -341,6 +355,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Submit de Formulários de Configurações
 
   settingsForm.addEventListener('submit', handleSettingsSubmit);
+
+  const setDubladoBtn = document.getElementById('setDubladoBtn');
+  if (setDubladoBtn) {
+    setDubladoBtn.addEventListener('click', () => {
+      const preferredLanguage = document.getElementById('preferredLanguage');
+      if (preferredLanguage) {
+        preferredLanguage.value = 'somente dublado';
+      }
+    });
+  }
 
   sourceForm.addEventListener('submit', handleSourceSubmit);
 
@@ -415,7 +439,158 @@ document.addEventListener('DOMContentLoaded', () => {
 
   });
 
+  // Botões de Controle do Servidor
+  const restartServerBtn = document.getElementById('restartServerBtn');
+  const shutdownServerBtn = document.getElementById('shutdownServerBtn');
+  if (restartServerBtn) {
+    restartServerBtn.addEventListener('click', handleRestartServer);
+  }
+  if (shutdownServerBtn) {
+    shutdownServerBtn.addEventListener('click', handleShutdownServer);
+  }
+
 });
+
+// Controle do Servidor (Reiniciar / Desligar)
+function logServerControlError(errorMsg) {
+  const container = document.getElementById('serverControlLogContainer');
+  const logDiv = document.getElementById('serverControlLogs');
+  if (container && logDiv) {
+    container.classList.remove('hidden');
+    const time = new Date().toLocaleTimeString('pt-BR', { hour12: false });
+    const logLine = document.createElement('div');
+    logLine.className = "py-0.5 border-b border-red-500/10 dark:border-red-950/30 text-[11px] font-mono leading-relaxed text-red-650 dark:text-red-400";
+    logLine.innerText = `[${time}] ${errorMsg}`;
+    logDiv.appendChild(logLine);
+    logDiv.scrollTop = logDiv.scrollHeight;
+  }
+}
+
+async function handleRestartServer() {
+  if (!confirm("Tem certeza que deseja REINICIAR a máquina? Todos os processos ativos serão finalizados.")) return;
+
+  const btn = document.getElementById('restartServerBtn');
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Reiniciando...`;
+
+  // Limpa logs de erro anteriores
+  const logContainer = document.getElementById('serverControlLogContainer');
+  const logDiv = document.getElementById('serverControlLogs');
+  if (logContainer) logContainer.classList.add('hidden');
+  if (logDiv) logDiv.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/server/restart', { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Erro HTTP ${res.status}`);
+    }
+    
+    alert("A máquina está sendo reiniciada. A conexão com esta página será perdida.");
+    setTimeout(() => {
+      window.location.reload();
+    }, 4000);
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    logServerControlError("Erro ao reiniciar a máquina: " + err.message);
+  }
+}
+
+async function handleShutdownServer() {
+  if (!confirm("Tem certeza que deseja DESLIGAR a máquina? A aplicação e a máquina deixarão de funcionar até que o botão físico de energia seja pressionado.")) return;
+
+  const btn = document.getElementById('shutdownServerBtn');
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Desligando...`;
+
+  // Limpa logs de erro anteriores
+  const logContainer = document.getElementById('serverControlLogContainer');
+  const logDiv = document.getElementById('serverControlLogs');
+  if (logContainer) logContainer.classList.add('hidden');
+  if (logDiv) logDiv.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/server/shutdown', { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Erro HTTP ${res.status}`);
+    }
+    
+    alert("A máquina está sendo desligada. A conexão com esta página será perdida.");
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    logServerControlError("Erro ao desligar a máquina: " + err.message);
+  }
+}
+
+async function handleStopAllSearches() {
+  if (!confirm("Tem certeza que deseja PARAR todas as buscas ativas e pendentes e fechar todos os navegadores?")) return;
+
+  const btn = document.getElementById('stopAllSearchesBtn');
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Parando...`;
+
+  try {
+    const res = await fetch('/api/searches/stop-all', { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Erro HTTP ${res.status}`);
+    }
+    
+    // Recarrega a lista de buscas
+    await fetchSearches();
+    
+    // Se a busca ativa no momento for uma das que parou, atualiza a UI dela
+    if (activeSearchId) {
+      await handleSearchClick(activeSearchId);
+    }
+    
+  } catch (err) {
+    alert("Erro ao parar todas as buscas: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+async function handleRestartAllSearches() {
+  if (!confirm("Tem certeza que deseja reiniciar todas as buscas não concluídas? O processo será executado de forma sequencial (uma busca por vez).")) return;
+
+  const btn = document.getElementById('restartAllSearchesBtn');
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Reiniciando...`;
+
+  try {
+    const res = await fetch('/api/searches/restart-all', { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Erro HTTP ${res.status}`);
+    }
+    
+    const result = await res.json();
+    alert(result.message || "Buscas reiniciadas com sucesso!");
+    
+    // Recarrega a lista de buscas
+    await fetchSearches();
+    
+    if (activeSearchId) {
+      await handleSearchClick(activeSearchId);
+    }
+    
+  } catch (err) {
+    alert("Erro ao reiniciar buscas: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
 
 
 
@@ -598,55 +773,43 @@ async function fetchSettings() {
 // Salva as configurações gerais
 
 async function handleSettingsSubmit(e) {
-
   e.preventDefault();
 
-  
-
-  const config = {
-
-    aiProvider: document.getElementById('aiProvider').value,
-
-    aiModel: document.getElementById('aiModel').value.trim(),
-
-    aiUrl: document.getElementById('aiUrl').value.trim(),
-
-    aiToken: document.getElementById('aiToken').value.trim(),
-
-    preferredLanguage: document.getElementById('preferredLanguage').value.trim(),
-
-    preferredResolution: document.getElementById('preferredResolution').value
-
-  };
-
-
-
-  try {
-
-    const res = await fetch('/api/settings', {
-
-      method: 'POST',
-
-      headers: { 'Content-Type': 'application/json' },
-
-      body: JSON.stringify(config)
-
-    });
-
-    
-
-    if (!res.ok) throw new Error("Erro ao gravar dados");
-
-    const data = await res.json();
-
-    alert(data.message || "Configurações gravadas com sucesso.");
-
-  } catch (err) {
-
-    alert("Erro ao salvar: " + err.message);
-
+  const submitBtn = settingsForm.querySelector('button[type="submit"]');
+  if (submitBtn) {
+    if (submitBtn.disabled) return;
+    submitBtn.disabled = true;
+    submitBtn.dataset.originalHtml = submitBtn.innerHTML;
+    submitBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Gravando...`;
   }
 
+  const config = {
+    aiProvider: document.getElementById('aiProvider').value,
+    aiModel: document.getElementById('aiModel').value.trim(),
+    aiUrl: document.getElementById('aiUrl').value.trim(),
+    aiToken: document.getElementById('aiToken').value.trim(),
+    preferredLanguage: document.getElementById('preferredLanguage').value.trim(),
+    preferredResolution: document.getElementById('preferredResolution').value
+  };
+
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config)
+    });
+    
+    if (!res.ok) throw new Error("Erro ao gravar dados");
+    const data = await res.json();
+    alert(data.message || "Configurações gravadas com sucesso.");
+  } catch (err) {
+    alert("Erro ao salvar: " + err.message);
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = submitBtn.dataset.originalHtml || submitBtn.innerHTML;
+    }
+  }
 }
 
 
@@ -1006,81 +1169,56 @@ function editSource(id) {
 // Trata o envio do formulário de Fonte (Criação/Edição)
 
 async function handleSourceSubmit(e) {
-
   e.preventDefault();
-
   
-
+  const submitBtn = sourceForm.querySelector('button[type="submit"]');
+  if (submitBtn) {
+    if (submitBtn.disabled) return;
+    submitBtn.disabled = true;
+    submitBtn.dataset.originalHtml = submitBtn.innerHTML;
+    submitBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Salvando...`;
+  }
+  
   const id = sourceIdInput.value;
-
   const checkboxes = sourceForm.querySelectorAll('input[name="contentTypes"]:checked');
-
   const contentTypes = Array.from(checkboxes).map(cb => cb.value);
-
   
-
   const sourceData = {
-
     name: sourceNameInput.value.trim(),
-
     url: sourceUrlInput.value.trim(),
-
     searchUrlPattern: sourcePatternInput.value.trim(),
-
     description: sourceDescriptionInput.value.trim(),
-
     contentTypes: contentTypes,
-
     isActive: sourceActiveInput.checked
-
   };
 
-
-
   try {
-
     let url = '/api/sources';
-
     let method = 'POST';
-
     
-
     if (id) {
-
       url = `/api/sources/${id}`;
-
       method = 'PUT';
-
     }
-
     
-
     const res = await fetch(url, {
-
       method: method,
-
       headers: { 'Content-Type': 'application/json' },
-
       body: JSON.stringify(sourceData)
-
     });
-
     
-
     if (!res.ok) throw new Error("Erro ao gravar fonte de busca");
-
     
-
     closeSourceModal();
-
     fetchSources(); // Recarrega a listagem
-
   } catch (err) {
-
     alert("Falha ao salvar fonte: " + err.message);
-
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = submitBtn.dataset.originalHtml || submitBtn.innerHTML;
+    }
   }
-
 }
 
 
@@ -1298,32 +1436,90 @@ function importSources() {
 
 // --- BUSCAS E EXECUÇÃO ---
 
+function connectGlobalSSE() {
+  if (globalEventSource) {
+    try { globalEventSource.close(); } catch(e) {}
+  }
+  
+  globalEventSource = new EventSource('/api/sse/global');
+  
+  globalEventSource.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      const { searchId, type, data } = payload;
+      const idNum = Number(searchId);
+      
+      switch (type) {
+        case 'result':
+          const search = searches.find(s => s.id === idNum);
+          if (search) {
+            const newCount = (search.resultsCount || 0) + 1;
+            updateSidebarResultCount(idNum, newCount);
+          }
+          if (activeSearchId === idNum) {
+            if (!activeSearchData.results.some(r => r.id === data.id)) {
+              activeSearchData.results.push(data);
+              appendResultCard(data);
+              resultsCountBadge.innerText = activeSearchData.results.length;
+            }
+          }
+          localStorage.setItem('cached_searches', JSON.stringify(searches));
+          break;
+          
+        case 'status_change':
+          updateSidebarStatus(idNum, data.status);
+          if (activeSearchId === idNum) {
+            updateActiveSearchStatusUI(data.status);
+          }
+          localStorage.setItem('cached_searches', JSON.stringify(searches));
+          break;
+          
+        case 'meta_change':
+          updateSidebarMeta(idNum, data.type, data.episodesCount);
+          if (activeSearchId === idNum) {
+            updateActiveSearchMetaUI(data.type, data.episodesCount);
+          }
+          localStorage.setItem('cached_searches', JSON.stringify(searches));
+          break;
+      }
+    } catch (err) {
+      console.warn("Erro ao processar mensagem SSE global:", err);
+    }
+  };
 
-
-// Busca as pesquisas salvas
+  globalEventSource.onerror = () => {
+    console.warn("SSE global desconectado. Tentando reconectar em 5 segundos...");
+    try { globalEventSource.close(); } catch(e) {}
+    setTimeout(connectGlobalSSE, 5000);
+  };
+}
 
 async function fetchSearches() {
-
-  try {
-
-    const res = await fetch('/api/searches');
-
-    if (!res.ok) throw new Error("Erro ao carregar histórico");
-
-    searches = await res.json();
-
-    
-
-    updateStats();
-
-    renderSearchesList();
-
-  } catch (err) {
-
-    console.error("Falha ao carregar buscas:", err);
-
+  // Tenta carregar cache instantaneamente do localStorage para melhor UX (SWR no cliente)
+  const cached = localStorage.getItem('cached_searches');
+  if (cached) {
+    try {
+      searches = JSON.parse(cached);
+      updateStats();
+      renderSearchesList();
+    } catch (e) {
+      console.warn("Erro ao decodificar buscas cacheadas:", e);
+    }
   }
 
+  try {
+    const res = await fetch('/api/searches');
+    if (!res.ok) throw new Error("Erro ao carregar histórico");
+    searches = await res.json();
+    
+    // Atualiza cache local
+    localStorage.setItem('cached_searches', JSON.stringify(searches));
+    
+    updateStats();
+    renderSearchesList();
+  } catch (err) {
+    console.error("Falha ao carregar buscas:", err);
+  }
 }
 
 
@@ -1416,50 +1612,46 @@ async function handleSearchClick(id) {
 
 
 
-// Submete a nova busca
-
 async function handleSearchSubmit(e) {
-
   e.preventDefault();
 
   const query = queryInput.value.trim();
-
   if (!query) return;
 
-
-
-  try {
-
-    const res = await fetch('/api/search', {
-
-      method: 'POST',
-
-      headers: { 'Content-Type': 'application/json' },
-
-      body: JSON.stringify({ query })
-
-    });
-
-    
-
-    if (!res.ok) throw new Error("Falha ao criar busca");
-
-    const newSearch = await res.json();
-
-    
-
-    searches.unshift({ ...newSearch, resultsCount: 0 });
-
-    updateStats();
-
-    selectSearch(newSearch.id);
-
-  } catch (err) {
-
-    alert("Erro: " + err.message);
-
+  const submitBtn = searchForm.querySelector('button[type="submit"]');
+  if (submitBtn) {
+    if (submitBtn.disabled) return;
+    submitBtn.disabled = true;
+    submitBtn.dataset.originalHtml = submitBtn.innerHTML;
+    submitBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-lg"></i> Iniciando...`;
   }
 
+  try {
+    const res = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+    
+    if (!res.ok) throw new Error("Falha ao criar busca");
+    const newSearch = await res.json();
+    
+    searches.unshift({ ...newSearch, resultsCount: 0 });
+    updateStats();
+    
+    // Salva no localStorage para SWR
+    localStorage.setItem('cached_searches', JSON.stringify(searches));
+    
+    selectSearch(newSearch.id);
+    queryInput.value = ''; // limpa o input
+  } catch (err) {
+    alert("Erro: " + err.message);
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = submitBtn.dataset.originalHtml || submitBtn.innerHTML;
+    }
+  }
 }
 
 
@@ -1467,97 +1659,75 @@ async function handleSearchSubmit(e) {
 // Para a busca ativa
 
 async function stopActiveSearch() {
-
   if (!activeSearchId) return;
 
-  try {
-
-    const res = await fetch(`/api/searches/${activeSearchId}/stop`, { method: 'POST' });
-
-    if (!res.ok) throw new Error("Falha ao parar busca");
-
-    
-
-    updateActiveSearchStatusUI('stopped');
-
-  } catch (err) {
-
-    alert("Erro: " + err.message);
-
+  const originalHtml = stopSearchBtn ? stopSearchBtn.innerHTML : null;
+  if (stopSearchBtn) {
+    stopSearchBtn.disabled = true;
+    stopSearchBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Parando...`;
   }
 
+  try {
+    const res = await fetch(`/api/searches/${activeSearchId}/stop`, { method: 'POST' });
+    if (!res.ok) throw new Error("Falha ao parar busca");
+    
+    updateActiveSearchStatusUI('stopped');
+  } catch (err) {
+    alert("Erro: " + err.message);
+  } finally {
+    if (stopSearchBtn) {
+      stopSearchBtn.disabled = false;
+      stopSearchBtn.innerHTML = originalHtml;
+    }
+  }
 }
 
-
-
 // Reinicia ou retoma a busca
-
 async function restartActiveSearch(resume) {
-
   if (!activeSearchId) return;
 
-  
-
   const confirmMsg = resume 
-
     ? "Deseja retomar a busca de onde parou? (O agente continuará avaliando apenas novos torrents)"
-
     : "Tem certeza que deseja reiniciar do zero? Todos os resultados e logs desta busca serão apagados.";
-
     
-
   if (!confirm(confirmMsg)) return;
 
-
-
-  try {
-
-    const res = await fetch(`/api/searches/${activeSearchId}/restart`, {
-
-      method: 'POST',
-
-      headers: { 'Content-Type': 'application/json' },
-
-      body: JSON.stringify({ resume })
-
-    });
-
-    
-
-    if (!res.ok) throw new Error("Falha ao comandar reinicialização");
-
-    const updatedSearch = await res.json();
-
-    
-
-    if (!resume) {
-
-      activeSearchData.results = [];
-
-      activeSearchData.logs = [];
-
-      renderLogs();
-
-      renderResults();
-
-    }
-
-    
-
-    updateActiveSearchStatusUI('pending');
-
-    updateActiveSearchMetaUI(updatedSearch.type, updatedSearch.episodesCount);
-
-    
-
-    openSSE(activeSearchId);
-
-  } catch (err) {
-
-    alert("Erro: " + err.message);
-
+  const btn = resume ? resumeSearchBtn : restartSearchBtn;
+  const originalHtml = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> ${resume ? 'Retomando...' : 'Reiniciando...'}`;
   }
 
+  try {
+    const res = await fetch(`/api/searches/${activeSearchId}/restart`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resume })
+    });
+    
+    if (!res.ok) throw new Error("Falha ao comandar reinicialização");
+    const updatedSearch = await res.json();
+    
+    if (!resume) {
+      activeSearchData.results = [];
+      activeSearchData.logs = [];
+      renderLogs();
+      renderResults();
+    }
+    
+    updateActiveSearchStatusUI('pending');
+    updateActiveSearchMetaUI(updatedSearch.type, updatedSearch.episodesCount);
+    
+    openSSE(activeSearchId);
+  } catch (err) {
+    alert("Erro: " + err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+  }
 }
 
 
@@ -2587,6 +2757,22 @@ async function checkDelugeStatus() {
 
 
 async function fetchDelugeTorrents() {
+  const originalHtml = refreshDelugeBtn ? refreshDelugeBtn.innerHTML : null;
+  if (refreshDelugeBtn) {
+    if (refreshDelugeBtn.disabled) return;
+    refreshDelugeBtn.disabled = true;
+    refreshDelugeBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Atualizando...`;
+  }
+
+  // Tenta carregar cache local instantaneamente (SWR no cliente)
+  const cached = localStorage.getItem('cached_deluge_torrents');
+  if (cached) {
+    try {
+      delugeTorrentsCache = JSON.parse(cached);
+      renderDelugeTorrents(delugeTorrentsCache);
+    } catch (e) {}
+  }
+
   await checkDelugeStatus();
   
   if (!delugeOnline) {
@@ -2601,6 +2787,10 @@ async function fetchDelugeTorrents() {
     delugeStatDownloading.innerText = '0';
     delugeStatDlSpeed.innerText = '0 KB/s';
     delugeStatUlSpeed.innerText = '0 KB/s';
+    if (refreshDelugeBtn) {
+      refreshDelugeBtn.disabled = false;
+      refreshDelugeBtn.innerHTML = originalHtml;
+    }
     return;
   }
 
@@ -2613,9 +2803,15 @@ async function fetchDelugeTorrents() {
     }
 
     delugeTorrentsCache = data.torrents || {};
+    localStorage.setItem('cached_deluge_torrents', JSON.stringify(delugeTorrentsCache));
     renderDelugeTorrents(delugeTorrentsCache);
   } catch (err) {
     console.error("Erro ao buscar torrents:", err);
+  } finally {
+    if (refreshDelugeBtn) {
+      refreshDelugeBtn.disabled = false;
+      refreshDelugeBtn.innerHTML = originalHtml;
+    }
   }
 }
 

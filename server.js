@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
-const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry } = require('./database');
-const { enqueueSearch, stopSearchAgent, testConnection, analyzeSearchSource, cancelSearchSourceAnalysis, analysisEvents } = require('./agent');
+const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry, sequelize } = require('./database');
+const { enqueueSearch, stopSearchAgent, stopAllSearchAgents, testConnection, analyzeSearchSource, cancelSearchSourceAnalysis, analysisEvents } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
 
@@ -75,11 +75,13 @@ app.get('/storage', (req, res) => {
 
 // Gerenciamento de conexões SSE em tempo real
 const sseClients = new Map(); // searchId -> Set de Response
+const globalSseClients = new Set(); // Set de Response global
 
 global.sseBroadcast = (searchId, eventData) => {
   const clients = sseClients.get(Number(searchId));
+  const payload = `data: ${JSON.stringify(eventData)}\n\n`;
+  
   if (clients) {
-    const payload = `data: ${JSON.stringify(eventData)}\n\n`;
     clients.forEach(res => {
       try {
         res.write(payload);
@@ -88,11 +90,23 @@ global.sseBroadcast = (searchId, eventData) => {
       }
     });
   }
+
+  // Envia também para clientes globais (adicionando searchId)
+  const globalPayload = `data: ${JSON.stringify({ searchId: Number(searchId), ...eventData })}\n\n`;
+  globalSseClients.forEach(res => {
+    try {
+      res.write(globalPayload);
+    } catch (err) {
+      // Ignora, tratado no close do request
+    }
+  });
 };
 
 // --- CACHE SWR (Stale-While-Revalidate) ---
 // Retorna dado em cache imediatamente (mesmo que velho) e revalida em background.
 // Isso garante que o frontend não fica travado esperando queries pesadas no DietPi.
+const activeRevalidations = new Set();
+
 async function withSWRCache(key, ttlSeconds, fetchFn) {
   try {
     const cached = await CacheEntry.findByPk(key);
@@ -109,20 +123,25 @@ async function withSWRCache(key, ttlSeconds, fetchFn) {
       // Cache stale: retorna imediatamente E revalida em background
       const staleData = JSON.parse(cached.data);
       
-      // Revalida de forma assíncrona (não bloqueia a resposta)
-      setImmediate(async () => {
-        try {
-          const freshData = await fetchFn();
-          await CacheEntry.upsert({
-            key,
-            data: JSON.stringify(freshData),
-            cachedAt: new Date(),
-            ttl: ttlSeconds
-          });
-        } catch (e) {
-          console.error(`[SWR Cache] Erro ao revalidar "${key}":`, e.message);
-        }
-      });
+      // Revalida de forma assíncrona (não bloqueia a resposta) se não houver revalidação ativa
+      if (!activeRevalidations.has(key)) {
+        activeRevalidations.add(key);
+        setImmediate(async () => {
+          try {
+            const freshData = await fetchFn();
+            await CacheEntry.upsert({
+              key,
+              data: JSON.stringify(freshData),
+              cachedAt: new Date(),
+              ttl: ttlSeconds
+            });
+          } catch (e) {
+            console.error(`[SWR Cache] Erro ao revalidar "${key}":`, e.message);
+          } finally {
+            activeRevalidations.delete(key);
+          }
+        });
+      }
       
       return staleData;
     }
@@ -149,7 +168,13 @@ async function withSWRCache(key, ttlSeconds, fetchFn) {
 async function invalidateCache(...keys) {
   try {
     const { Op } = require('sequelize');
-    await CacheEntry.destroy({ where: { key: { [Op.in]: keys } } });
+    // Em vez de destruir, marca como expirado (stale) alterando a data para 1970
+    // Isso garante que o cache antigo continue sendo entregue instantaneamente
+    // enquanto a revalidação ocorre em segundo plano (SWR puro).
+    await CacheEntry.update(
+      { cachedAt: new Date(0) },
+      { where: { key: { [Op.in]: keys } } }
+    );
   } catch (e) {
     // Não é crítico se falhar
   }
@@ -195,6 +220,50 @@ app.post('/api/settings/test', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+app.post('/api/server/restart', async (req, res) => {
+  try {
+    const { exec } = require('child_process');
+    const isWindows = process.platform === 'win32';
+    const command = isWindows ? 'shutdown /r /t 5 /f' : 'sudo shutdown -r +1';
+    
+    console.log(`Reinício do sistema operacional solicitado pelo usuário. Executando: ${command}`);
+    
+    exec(command, (err, stdout, stderr) => {
+      if (err) {
+        console.error(`Erro ao executar comando de reinício: ${stderr || err.message}`);
+        return res.status(500).json({ success: false, error: stderr || err.message });
+      }
+      res.json({ success: true, message: 'O sistema operacional está sendo reiniciado...' });
+    });
+  } catch (err) {
+    console.error('Erro ao processar reinício do servidor:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/server/shutdown', async (req, res) => {
+  try {
+    const { exec } = require('child_process');
+    const isWindows = process.platform === 'win32';
+    const command = isWindows ? 'shutdown /s /t 5 /f' : 'sudo shutdown -h +1';
+    
+    console.log(`Desligamento do sistema operacional solicitado pelo usuário. Executando: ${command}`);
+    
+    exec(command, (err, stdout, stderr) => {
+      if (err) {
+        console.error(`Erro ao executar comando de desligamento: ${stderr || err.message}`);
+        return res.status(500).json({ success: false, error: stderr || err.message });
+      }
+      res.json({ success: true, message: 'O sistema operacional está sendo desligado...' });
+    });
+  } catch (err) {
+    console.error('Erro ao processar desligamento do servidor:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 
 // 2. Fontes de Busca - CRUD
 
@@ -508,6 +577,56 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
+// 3.5 Parar todas as buscas
+app.post('/api/searches/stop-all', async (req, res) => {
+  try {
+    await stopAllSearchAgents();
+    await invalidateCache('searches_list');
+    res.json({ success: true, message: 'Todas as buscas ativas e pendentes foram interrompidas e navegadores fechados.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3.6 Reiniciar todas as buscas não concluídas de forma sequencial
+app.post('/api/searches/restart-all', async (req, res) => {
+  try {
+    const { Op } = require('sequelize');
+
+    // Encontra todas as buscas não concluídas
+    const searchesToResume = await Search.findAll({
+      where: {
+        status: { [Op.ne]: 'completed' }
+      },
+      order: [['id', 'DESC']]
+    });
+
+    if (searchesToResume.length > 0) {
+      for (const search of searchesToResume) {
+        // Altera o status para pending se estava parado/falhado
+        if (search.status !== 'pending') {
+          search.status = 'pending';
+          await search.save();
+          
+          if (global.sseBroadcast) {
+            global.sseBroadcast(search.id, { type: 'status_change', data: { status: 'pending' } });
+          }
+        }
+        enqueueSearch(search.id, true);
+      }
+    }
+
+    await invalidateCache('searches_list');
+    res.json({ 
+      success: true, 
+      message: `Enfileiradas ${searchesToResume.length} buscas para reinicialização sequencial.`,
+      count: searchesToResume.length 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 4. Parar busca ativa
 app.post('/api/searches/:id/stop', async (req, res) => {
   const searchId = Number(req.params.id);
@@ -576,16 +695,26 @@ app.get('/api/searches', async (req, res) => {
     const data = await withSWRCache(cacheKey, 15, async () => {
       const searches = await Search.findAll({
         where,
-        order: [['updatedAt', 'DESC']],
-        limit: 10
+        order: [['updatedAt', 'DESC']]
       });
       
-      const searchesWithStats = await Promise.all(searches.map(async (search) => {
-        const resultsCount = await TorrentResult.count({ where: { searchId: search.id } });
-        return {
-          ...search.toJSON(),
-          resultsCount
-        };
+      const searchIds = searches.map(s => s.id);
+      let countsMap = {};
+      
+      if (searchIds.length > 0) {
+        const counts = await TorrentResult.findAll({
+          attributes: ['searchId', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+          where: { searchId: searchIds },
+          group: ['searchId']
+        });
+        counts.forEach(c => {
+          countsMap[c.searchId] = parseInt(c.get('count') || 0, 10);
+        });
+      }
+      
+      const searchesWithStats = searches.map(search => ({
+        ...search.toJSON(),
+        resultsCount: countsMap[search.id] || 0
       }));
       
       return searchesWithStats;
@@ -675,25 +804,56 @@ app.get('/api/searches/:id/stream', (req, res) => {
   });
 });
 
+// 9.5 Endpoint SSE Global para atualizações em tempo real do histórico
+app.get('/api/sse/global', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
+  });
+  res.write('\n');
+  
+  globalSseClients.add(res);
+  
+  const pingInterval = setInterval(() => {
+    res.write(': ping\n\n');
+  }, 15000);
+  
+  req.on('close', () => {
+    clearInterval(pingInterval);
+    globalSseClients.delete(res);
+  });
+});
+
 
 // --- 10. ROTAS DO DELUGE ---
 
 // Retorna o status de conexão com o Deluge
 app.get('/api/deluge/status', async (req, res) => {
-  await verificarDeluge();
-  res.json({
-    disponivel: delugeDisponivel,
-    port: delugeCreds ? delugeCreds.delugeWeb.porta : null,
-    error: delugeErro
-  });
+  try {
+    const data = await withSWRCache('deluge_status', 10, async () => {
+      await verificarDeluge();
+      return {
+        disponivel: delugeDisponivel,
+        port: delugeCreds ? delugeCreds.delugeWeb.porta : null,
+        error: delugeErro
+      };
+    });
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Lista todos os torrents e seus status no Deluge
 app.get('/api/deluge/torrents', async (req, res) => {
   try {
-    const client = await getDelugeClient();
-    const torrents = await client.getStatus();
-    res.json({ success: true, torrents });
+    const data = await withSWRCache('deluge_torrents', 5, async () => {
+      const client = await getDelugeClient();
+      const torrents = await client.getStatus();
+      return { success: true, torrents };
+    });
+    res.json(data);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -713,20 +873,30 @@ app.get('/api/deluge/stream', async (req, res) => {
     isSending = true;
 
     try {
-      let disponivel = false;
-      let port = null;
-      let torrents = {};
+      const statusData = await withSWRCache('deluge_status', 10, async () => {
+        await verificarDeluge();
+        return {
+          disponivel: delugeDisponivel,
+          port: delugeCreds ? delugeCreds.delugeWeb.porta : null,
+          error: delugeErro
+        };
+      });
 
-      try {
-        const client = await getDelugeClient();
-        torrents = await client.getStatus();
-        disponivel = true;
-        port = client.port;
-      } catch (err) {
-        disponivel = false;
-      }
+      const torrentsData = await withSWRCache('deluge_torrents', 5, async () => {
+        try {
+          const client = await getDelugeClient();
+          const torrents = await client.getStatus();
+          return { success: true, torrents };
+        } catch (err) {
+          return { success: false, error: err.message };
+        }
+      });
 
-      res.write(`data: ${JSON.stringify({ disponivel, port, torrents })}\n\n`);
+      res.write(`data: ${JSON.stringify({ 
+        disponivel: statusData.disponivel, 
+        port: statusData.port, 
+        torrents: torrentsData.success ? torrentsData.torrents : {} 
+      })}\n\n`);
     } catch (e) {
       // Ignora erros ao fechar conexão
     } finally {
@@ -755,6 +925,7 @@ app.post('/api/deluge/add', async (req, res) => {
   try {
     const client = await getDelugeClient();
     const torrentId = await client.addMagnet(magnetLink);
+    await invalidateCache('deluge_torrents');
     res.json({ success: true, torrentId });
   } catch (err) {
     // Torrent já existe na sessão — não é um erro real
@@ -788,6 +959,7 @@ app.post('/api/deluge/add-multiple', async (req, res) => {
         }
       }
     }
+    await invalidateCache('deluge_torrents');
     res.json({ success: true, results });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -800,6 +972,7 @@ app.post('/api/deluge/torrents/:id/pause', async (req, res) => {
   try {
     const client = await getDelugeClient();
     await client.pause(id);
+    await invalidateCache('deluge_torrents');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -812,6 +985,7 @@ app.post('/api/deluge/torrents/:id/resume', async (req, res) => {
   try {
     const client = await getDelugeClient();
     await client.resume(id);
+    await invalidateCache('deluge_torrents');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -825,6 +999,7 @@ app.post('/api/deluge/torrents/:id/remove', async (req, res) => {
   try {
     const client = await getDelugeClient();
     const success = await client.remove(id, removeData === true);
+    await invalidateCache('deluge_torrents', 'storage_tree');
     res.json({ success: true, removed: success });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -847,6 +1022,7 @@ app.post('/api/deluge/torrents/remove-errors', async (req, res) => {
     const promises = errorIds.map(id => client.remove(id, removeData === true));
     await Promise.all(promises);
     
+    await invalidateCache('deluge_torrents', 'storage_tree');
     res.json({ success: true, count: errorIds.length });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -923,6 +1099,66 @@ app.post('/api/storage/discover-path', async (req, res) => {
   }
 });
 
+async function getDiskSpace(dirPath) {
+  const os = require('os');
+  const isWin = os.platform() === 'win32';
+  
+  try {
+    if (isWin) {
+      let drive = 'C:';
+      const match = dirPath.match(/^([a-zA-Z]:)/);
+      if (match) {
+        drive = match[1];
+      }
+      
+      const cmd = `powershell -Command "Get-PSDrive -Name '${drive[0]}' | Select-Object Used, Free"`;
+      const { stdout } = await execPromise(cmd);
+      
+      const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      if (lines.length >= 3) {
+        const parts = lines[2].split(/\s+/).map(Number);
+        if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+          const used = parts[0];
+          const free = parts[1];
+          const total = used + free;
+          return { total, free, used };
+        }
+      }
+      
+      const wmicCmd = `wmic logicaldisk where DeviceID="${drive}" get FreeSpace,Size`;
+      const { stdout: wmicOut } = await execPromise(wmicCmd);
+      const wmicLines = wmicOut.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      if (wmicLines.length >= 2) {
+        const parts = wmicLines[1].split(/\s+/).map(Number);
+        if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+          const free = parts[0];
+          const total = parts[1];
+          const used = total - free;
+          return { total, free, used };
+        }
+      }
+    } else {
+      const { stdout } = await execPromise(`df -B1 "${dirPath}"`);
+      const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length >= 2) {
+        const parts = lines[1].split(/\s+/);
+        if (parts.length >= 4) {
+          const total = parseInt(parts[1], 10);
+          const used = parseInt(parts[2], 10);
+          const free = parseInt(parts[3], 10);
+          if (!isNaN(total) && !isNaN(used) && !isNaN(free)) {
+            return { total, free, used };
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Storage] Erro ao obter espaço em disco:', err.message);
+  }
+  
+  return null;
+}
+
 app.get('/api/storage/tree', async (req, res) => {
   try {
     const setting = await SystemSetting.findOne({ where: { key: 'deluge_download_path' } });
@@ -931,65 +1167,69 @@ app.get('/api/storage/tree', async (req, res) => {
     }
     const targetDir = setting.value;
 
-    console.log(`[Storage] Iniciando mapeamento da pasta: ${targetDir}`);
-    
-    const { Worker } = require('worker_threads');
-    
-    let rootFiles;
-    try { 
-      rootFiles = await fs.promises.readdir(targetDir); 
-    } catch(e) { 
-      console.error(`[Storage] Erro ao ler a pasta raiz do Deluge (${targetDir}):`, e.message);
-      throw new Error("Não foi possível ler o diretório raiz."); 
-    }
-    
-    console.log(`[Storage] Foram encontrados ${rootFiles.length} itens na raiz.`);
-    
-    const rootPaths = rootFiles.map(f => path.join(targetDir, f));
-    
-    // Divisão exata para 2 threads
-    const half = Math.ceil(rootPaths.length / 2);
-    const chunk1 = rootPaths.slice(0, half);
-    const chunk2 = rootPaths.slice(half);
-    
-    const runWorker = (pathsChunk) => {
-      return new Promise((resolve, reject) => {
-        if (pathsChunk.length === 0) return resolve([]);
-        const worker = new Worker(path.join(__dirname, 'storage_worker.js'), {
-          workerData: { paths: pathsChunk, maxDepth: 5 }
+    const tree = await withSWRCache('storage_tree', 60, async () => {
+      console.log(`[Storage] Iniciando mapeamento da pasta: ${targetDir}`);
+      
+      const { Worker } = require('worker_threads');
+      
+      let rootFiles;
+      try { 
+        rootFiles = await fs.promises.readdir(targetDir); 
+      } catch(e) { 
+        console.error(`[Storage] Erro ao ler a pasta raiz do Deluge (${targetDir}):`, e.message);
+        throw new Error("Não foi possível ler o diretório raiz."); 
+      }
+      
+      console.log(`[Storage] Foram encontrados ${rootFiles.length} itens na raiz.`);
+      
+      const rootPaths = rootFiles.map(f => path.join(targetDir, f));
+      
+      // Divisão exata para 2 threads
+      const half = Math.ceil(rootPaths.length / 2);
+      const chunk1 = rootPaths.slice(0, half);
+      const chunk2 = rootPaths.slice(half);
+      
+      const runWorker = (pathsChunk) => {
+        return new Promise((resolve, reject) => {
+          if (pathsChunk.length === 0) return resolve([]);
+          const worker = new Worker(path.join(__dirname, 'storage_worker.js'), {
+            workerData: { paths: pathsChunk, maxDepth: 5 }
+          });
+          worker.on('message', msg => {
+            if (msg.error) reject(new Error(msg.error));
+            else resolve(msg.results);
+          });
+          worker.on('error', reject);
+          worker.on('exit', code => {
+            if (code !== 0) reject(new Error(`Worker stopped with exit code ${code}`));
+          });
         });
-        worker.on('message', msg => {
-          if (msg.error) reject(new Error(msg.error));
-          else resolve(msg.results);
-        });
-        worker.on('error', reject);
-        worker.on('exit', code => {
-          if (code !== 0) reject(new Error(`Worker stopped with exit code ${code}`));
-        });
-      });
-    };
-    
-    // Executamos as duas threads em paralelo
-    const [results1, results2] = await Promise.all([
-      runWorker(chunk1),
-      runWorker(chunk2)
-    ]);
-    
-    const rootChildren = [...results1, ...results2];
-    
-    let rootSize = 0;
-    for (const child of rootChildren) {
-       rootSize += child.value;
-    }
-    
-    const tree = { 
-       name: path.basename(targetDir), 
-       path: targetDir, 
-       value: rootSize, 
-       children: rootChildren 
-    };
-    
-    res.json(tree);
+      };
+      
+      // Executamos as duas threads em paralelo
+      const [results1, results2] = await Promise.all([
+        runWorker(chunk1),
+        runWorker(chunk2)
+      ]);
+      
+      const rootChildren = [...results1, ...results2];
+      
+      let rootSize = 0;
+      for (const child of rootChildren) {
+         rootSize += child.value;
+      }
+      
+      return { 
+         name: path.basename(targetDir), 
+         path: targetDir, 
+         value: rootSize, 
+         children: rootChildren 
+      };
+    });
+
+    const disk = await getDiskSpace(targetDir);
+
+    res.json({ tree, disk });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -997,8 +1237,15 @@ app.get('/api/storage/tree', async (req, res) => {
 });
 
 app.delete('/api/storage/delete', async (req, res) => {
-  const { path: targetPath } = req.body;
-  if (!targetPath) return res.status(400).json({ error: 'Caminho é obrigatório' });
+  const { path: targetPath, paths: targetPaths } = req.body;
+  
+  let pathsToDelete = [];
+  if (targetPath) pathsToDelete.push(targetPath);
+  if (targetPaths && Array.isArray(targetPaths)) pathsToDelete.push(...targetPaths);
+  
+  if (pathsToDelete.length === 0) {
+    return res.status(400).json({ error: 'Caminho ou lista de caminhos é obrigatório' });
+  }
   
   try {
     const setting = await SystemSetting.findOne({ where: { key: 'deluge_download_path' } });
@@ -1006,12 +1253,19 @@ app.delete('/api/storage/delete', async (req, res) => {
       return res.status(400).json({ error: 'Caminho do Deluge não definido.' });
     }
     
-    if (!targetPath.startsWith(setting.value)) {
-      return res.status(403).json({ error: 'Operação negada. O caminho deve estar dentro do diretório de downloads do Deluge.' });
+    // Valida se todos os caminhos começam na pasta de downloads do Deluge
+    for (const p of pathsToDelete) {
+      if (!p.startsWith(setting.value)) {
+        return res.status(403).json({ error: `Operação negada. O caminho deve estar dentro do diretório de downloads do Deluge: ${p}` });
+      }
     }
     
-    // Native node removal
-    fs.rmSync(targetPath, { recursive: true, force: true });
+    // Executa a remoção física
+    for (const p of pathsToDelete) {
+      fs.rmSync(p, { recursive: true, force: true });
+    }
+    
+    await invalidateCache('storage_tree');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1019,55 +1273,127 @@ app.delete('/api/storage/delete', async (req, res) => {
 });
 
 
-// Inicialização do Banco de Dados e Servidor
-initDatabase().then(async () => {
-  // Reseta buscas que ficaram travadas no estado "searching" devido a quedas/reinicializações
-  try {
-    const { Search } = require('./database');
-    const [affectedCount] = await Search.update(
-      { status: 'stopped' },
-      { where: { status: 'searching' } }
-    );
-    if (affectedCount > 0) {
-      console.log(`[Startup] Redefinidas ${affectedCount} buscas travadas em "searching" para "stopped".`);
+// Função para liberar a porta do servidor matando qualquer processo antigo
+async function liberarPortaServidor() {
+  const port = process.env.PORT || 4182;
+  console.log(`[Startup] Verificando se a porta ${port} está ocupada...`);
+  
+  if (process.platform !== 'win32') {
+    try {
+      // Tenta usar fuser para liberar a porta no Linux/macOS
+      await execPromise(`fuser -k ${port}/tcp`).catch(() => {});
+      console.log(`[Startup] Comando de liberação da porta ${port} enviado (fuser).`);
+      
+      // Pequena pausa para garantir que o SO liberou a porta
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (err) {
+      console.warn(`[Startup] Aviso ao liberar porta com fuser:`, err.message);
     }
-  } catch (err) {
-    console.error("Erro ao limpar buscas travadas na inicialização:", err);
+  } else {
+    try {
+      // Windows check
+      const { stdout } = await execPromise(`netstat -ano | findstr :${port}`).catch(() => ({ stdout: '' }));
+      if (stdout && stdout.trim()) {
+        const lines = stdout.split('\n');
+        for (const line of lines) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length >= 5) {
+            const pid = parts[parts.length - 1];
+            if (pid && pid !== '0' && pid !== process.pid.toString()) {
+              console.log(`[Startup] Processo antigo detectado no Windows na porta ${port} (PID: ${pid}). Terminando...`);
+              await execPromise(`taskkill /F /PID ${pid}`).catch(() => {});
+            }
+          }
+        }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    } catch (err) {
+      // Ignora erro
+    }
   }
+}
 
-  // Executa a verificação inicial do Deluge de forma assíncrona
-  verificarDeluge().catch(err => {
-    console.error("Erro na verificação inicial do Deluge:", err.message);
-  });
+// Inicialização do Banco de Dados e Servidor
+liberarPortaServidor().catch(err => {
+  console.error("[Startup] Erro ao liberar porta do servidor:", err.message);
+}).finally(() => {
+  initDatabase().then(async () => {
+    // Reseta buscas que ficaram travadas no estado "searching" devido a quedas/reinicializações
+    try {
+      const { Search } = require('./database');
+      const [affectedCount] = await Search.update(
+        { status: 'stopped' },
+        { where: { status: 'searching' } }
+      );
+      if (affectedCount > 0) {
+        console.log(`[Startup] Redefinidas ${affectedCount} buscas travadas em "searching" para "stopped".`);
+      }
+    } catch (err) {
+      console.error("Erro ao limpar buscas travadas na inicialização:", err);
+    }
 
-  // Descobre o caminho do Deluge no servidor se ainda não foi mapeado
-  discoverDelugePath().catch(err => {
-    console.error("Erro ao descobrir o caminho inicial do Deluge:", err.message);
-  });
+    // Agenda reinício automático das buscas não concluídas após 60 segundos
+    setTimeout(async () => {
+      try {
+        console.log('[Startup] Iniciando retomada automática de buscas...');
+        const { Search } = require('./database');
+        const { enqueueSearch } = require('./agent');
+        const { Op } = require('sequelize');
 
-  function obterIpLocal() {
-    const { networkInterfaces } = require('os');
-    const nets = networkInterfaces();
-    for (const name of Object.keys(nets)) {
-      for (const net of nets[name]) {
-        const familyV4Value = typeof net.family === 'string' ? 'IPv4' : 4;
-        if (net.family === familyV4Value && !net.internal) {
-          return net.address;
+        const searchesToResume = await Search.findAll({
+          where: {
+            status: { [Op.ne]: 'completed' }
+          },
+          order: [['id', 'DESC']]
+        });
+
+        if (searchesToResume.length > 0) {
+          console.log(`[Startup] Encontradas ${searchesToResume.length} buscas não concluídas. Enfileirando por ordem de recência...`);
+          for (const search of searchesToResume) {
+            enqueueSearch(search.id, true);
+          }
+        } else {
+          console.log('[Startup] Nenhuma busca pendente ou não concluída para reiniciar.');
+        }
+      } catch (err) {
+        console.error('[Startup] Erro ao retomar buscas pendentes:', err.message);
+      }
+    }, 60000); // 60 segundos
+
+    // Executa a verificação inicial do Deluge de forma assíncrona
+    verificarDeluge().catch(err => {
+      console.error("Erro na verificação inicial do Deluge:", err.message);
+    });
+
+    // Descobre o caminho do Deluge no servidor se ainda não foi mapeado
+    discoverDelugePath().catch(err => {
+      console.error("Erro ao descobrir o caminho inicial do Deluge:", err.message);
+    });
+
+    function obterIpLocal() {
+      const { networkInterfaces } = require('os');
+      const nets = networkInterfaces();
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+          const familyV4Value = typeof net.family === 'string' ? 'IPv4' : 4;
+          if (net.family === familyV4Value && !net.internal) {
+            return net.address;
+          }
         }
       }
+      return '127.0.0.1';
     }
-    return '127.0.0.1';
-  }
 
-  app.listen(PORT, () => {
-    const ipLocal = obterIpLocal();
-    console.log(`===================================================`);
-    console.log(` Servidor rodando em: http://localhost:${PORT}`);
-    console.log(` IP Local: http://${ipLocal}:${PORT}`);
-    console.log(` Banco de dados SQLite conectado com sucesso.`);
-    console.log(`===================================================`);
+    app.listen(PORT, () => {
+      const ipLocal = obterIpLocal();
+      console.log(`===================================================`);
+      console.log(` Servidor rodando em: http://localhost:${PORT}`);
+      console.log(` IP Local: http://${ipLocal}:${PORT}`);
+      console.log(` Banco de dados SQLite conectado com sucesso.`);
+      console.log(`===================================================`);
+    });
+  }).catch(err => {
+    console.error("Falha ao inicializar o banco de dados:", err);
   });
-}).catch(err => {
-  console.error("Falha ao inicializar o banco de dados:", err);
 });
 
