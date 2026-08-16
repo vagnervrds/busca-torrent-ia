@@ -215,6 +215,47 @@ const CacheEntry = sequelize.define('CacheEntry', {
   timestamps: false // Gerenciamos cachedAt manualmente
 });
 
+// Modelo de Páginas Monitoradas (MonitoredPage)
+const MonitoredPage = sequelize.define('MonitoredPage', {
+  id: {
+    type: DataTypes.INTEGER,
+    primaryKey: true,
+    autoIncrement: true
+  },
+  url: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true
+  },
+  title: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: 'Página sem título'
+  },
+  monitor: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true
+  },
+  torrentsCount: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0
+  },
+  lastContentChangedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  imageUrl: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  lastCheckedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  }
+});
+
 // Modelo de Logs do Agente (AgentLog)
 const AgentLog = sequelize.define('AgentLog', {
   id: {
@@ -273,6 +314,36 @@ async function initDatabase() {
   } catch (e) {
     // Tabela já existe
   }
+
+  // Cria tabela MonitoredPages se não existir
+  try {
+    await MonitoredPage.sync();
+    await sequelize.getQueryInterface().addColumn('MonitoredPages', 'torrentsCount', {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0
+    });
+  } catch (e) {
+    // Tabela/coluna já existe
+  }
+
+  try {
+    await sequelize.getQueryInterface().addColumn('MonitoredPages', 'lastContentChangedAt', {
+      type: DataTypes.DATE,
+      allowNull: true
+    });
+  } catch (e) {
+    // Coluna já existe
+  }
+
+  try {
+    await sequelize.getQueryInterface().addColumn('MonitoredPages', 'imageUrl', {
+      type: DataTypes.TEXT,
+      allowNull: true
+    });
+  } catch (e) {
+    // Coluna já existe
+  }
   
   // Seed de Configurações do Sistema Padrão se não existirem
   const defaultSettings = [
@@ -314,5 +385,6 @@ module.exports = {
   TorrentEvaluation,
   AgentLog,
   CacheEntry,
+  MonitoredPage,
   initDatabase
 };

@@ -286,6 +286,14 @@
 
       </button>
 
+      <button id="sidebarMonitoredBtn" class="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs flex items-center justify-center gap-2 border border-slate-200/50 dark:border-slate-700/50 transition-all">
+
+        <i class="ph-bold ph-desktop-tower text-base text-emerald-500"></i>
+
+        <span>Páginas Monitoradas</span>
+
+      </button>
+
       <button id="sidebarSettingsBtn" class="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs flex items-center justify-center gap-2 border border-slate-200/50 dark:border-slate-700/50 transition-all">
 
         <i class="ph-bold ph-gear text-base"></i>
@@ -807,6 +815,82 @@
             <h4 class="font-bold text-slate-700 dark:text-slate-350">Nenhum torrent em andamento</h4>
 
             <p class="text-xs max-w-sm mx-auto mt-1">Os torrents adicionados aparecerão listados aqui em tempo real.</p>
+
+          </div>
+
+        </div>
+
+      </section>
+
+
+
+      <!-- TELA DE PÁGINAS MONITORADAS -->
+
+      <section id="monitoredSection" class="hidden max-w-6xl mx-auto space-y-6">
+
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm animate-fadeIn">
+
+          <div class="space-y-1">
+
+            <div class="flex items-center gap-2">
+
+              <h2 class="text-2xl font-extrabold tracking-tight text-slate-850 dark:text-slate-100 flex items-center gap-2">
+
+                <i class="ph-bold ph-desktop-tower text-emerald-500"></i> Páginas Monitoradas
+
+              </h2>
+
+              <span id="monitoredCountBadge" class="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-500/10 text-emerald-600 border border-emerald-500/20">
+
+                0 Páginas
+
+              </span>
+
+            </div>
+
+            <p class="text-xs text-slate-400">Verificação e adição automática de torrents a cada 12 horas</p>
+
+          </div>
+
+
+
+          <div class="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+
+            <button id="checkAllMonitoredBtn" class="py-2.5 px-4 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all">
+
+              <i class="ph-bold ph-arrows-counter-clockwise text-sm"></i> Verificar Todas Agora
+
+            </button>
+
+            <button id="addMonitoredPageBtn" class="py-2.5 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-md">
+
+              <i class="ph-bold ph-plus-circle text-sm"></i> Adicionar Nova URL
+
+            </button>
+
+          </div>
+
+        </div>
+
+
+
+        <!-- Lista de Páginas Monitoradas -->
+
+        <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden animate-fadeIn">
+
+          <div id="monitoredPagesList" class="divide-y divide-slate-100 dark:divide-slate-800/80">
+
+            <!-- Páginas renderizadas via JavaScript -->
+
+            <div class="p-8 text-center text-slate-400 dark:text-slate-500">
+
+              <i class="ph-bold ph-desktop-tower text-3xl mb-2 text-emerald-500 opacity-60"></i>
+
+              <h4 class="font-bold text-slate-700 dark:text-slate-350">Nenhuma página sendo monitorada</h4>
+
+              <p class="text-xs max-w-sm mx-auto mt-1">Adicione a URL de páginas de torrents para capturar automaticamente novos episódios ou lançamentos a cada 12h.</p>
+
+            </div>
 
           </div>
 
@@ -1340,15 +1424,15 @@
 
   <div id="delugeAddUrlModal" class="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center hidden p-4 font-sans">
 
-    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-scaleIn">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-scaleIn">
 
       <!-- Header -->
 
-      <div class="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/30 dark:bg-slate-950/25">
+      <div class="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/30 dark:bg-slate-950/25">
 
         <h3 class="font-bold text-sm text-slate-850 dark:text-slate-100 flex items-center gap-2">
 
-          <i class="ph-bold ph-link-simple text-emerald-500 text-base"></i> Adicionar Torrent no Deluge
+          <i class="ph-bold ph-link-simple text-emerald-500 text-base"></i> Capturar & Baixar Torrents por URL
 
         </h3>
 
@@ -1364,7 +1448,7 @@
 
       <!-- Body -->
 
-      <form id="delugeAddUrlForm" class="p-6 space-y-4">
+      <form id="delugeAddUrlForm" class="p-6 space-y-4 overflow-y-auto flex-1">
 
         <div class="space-y-2">
 
@@ -1376,12 +1460,18 @@
 
           <p class="text-[11px] text-slate-400 dark:text-slate-500 leading-normal">
 
-            Cole abaixo um <b>Magnet Link</b> direto (ex: <code class="text-emerald-500 dark:text-emerald-400">magnet:?xt=...</code>) ou a <b>URL de uma página web</b> contendo links torrents.
+            Cole um <b>Magnet Link</b> direto ou a <b>URL de uma página web</b>. O sistema irá extrair o título de cada torrent encontrado na página e enviá-los imediatamente para download no Deluge.
 
           </p>
 
-          <textarea id="delugeUrlInput" rows="4" placeholder="magnet:?xt=urn:btih:... ou https://exemplo.com/filme-torrent" class="w-full py-2.5 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono resize-none transition-all" required></textarea>
+          <textarea id="delugeUrlInput" rows="3" placeholder="magnet:?xt=urn:btih:... ou https://exemplo.com/filme-torrent" class="w-full py-2.5 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono resize-none transition-all" required></textarea>
 
+          <div class="flex items-center gap-2 pt-1">
+            <input type="checkbox" id="delugeMonitorCheck" class="w-4 h-4 text-emerald-600 bg-slate-50 dark:bg-slate-950 border-slate-300 dark:border-slate-800 rounded focus:ring-emerald-500 transition-all accent-emerald-600 cursor-pointer" checked />
+            <label for="delugeMonitorCheck" class="text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+              Monitorar esta página a cada 12h para novos torrents
+            </label>
+          </div>
         </div>
 
 
@@ -1392,19 +1482,41 @@
 
 
 
+        <!-- Lista de Torrents e Títulos Encontrados -->
+
+        <div id="delugeFoundTorrentsContainer" class="hidden space-y-2.5 pt-1">
+
+          <div class="flex items-center justify-between text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+
+            <span class="flex items-center gap-1.5"><i class="ph-bold ph-list-bullets text-emerald-500"></i> Torrents Identificados na Página</span>
+
+            <span id="delugeFoundTorrentsCount" class="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-[10px] font-bold">0</span>
+
+          </div>
+
+          <div id="delugeFoundTorrentsList" class="space-y-2 max-h-56 overflow-y-auto pr-1">
+
+            <!-- Torrents renderizados via JavaScript -->
+
+          </div>
+
+        </div>
+
+
+
         <!-- Footer Buttons -->
 
-        <div class="flex items-center justify-end gap-2 pt-2">
+        <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800/80">
 
           <button id="cancelDelugeAddUrlBtn" type="button" class="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs transition-all">
 
-            Cancelar
+            Fechar
 
           </button>
 
           <button id="submitDelugeAddUrlBtn" type="submit" class="py-2.5 px-5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-md shadow-emerald-500/10 hover:shadow-lg transition-all flex items-center gap-2">
 
-            <i class="ph-bold ph-download-simple"></i> Adicionar ao Deluge
+            <i class="ph-bold ph-download-simple"></i> Extrair & Adicionar
 
           </button>
 

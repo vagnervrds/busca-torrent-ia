@@ -1,6 +1,6 @@
 const express = require('express');
 const path = require('path');
-const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry, sequelize } = require('./database');
+const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry, MonitoredPage, sequelize } = require('./database');
 const { enqueueSearch, stopSearchAgent, stopAllSearchAgents, testConnection, analyzeSearchSource, cancelSearchSourceAnalysis, analysisEvents } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
@@ -966,7 +966,196 @@ app.post('/api/deluge/add-multiple', async (req, res) => {
   }
 });
 
-// Adiciona torrents via Magnet Link direto ou extraindo Magnet Links de uma URL de página web
+// Helper para extrair a imagem destaque (capa/poster) de um HTML de página web
+function extractFeaturedImage(html, pageUrl) {
+  if (!html || typeof html !== 'string') return null;
+
+  // 1. Tags Meta (Open Graph & Twitter Card & image_src)
+  const ogMatch = html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ||
+                  html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i) ||
+                  html.match(/<meta\s+[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i) ||
+                  html.match(/<link\s+[^>]*rel=["']image_src["'][^>]*href=["']([^"']+)["']/i);
+  
+  let imageUrl = ogMatch ? ogMatch[1] : null;
+
+  // 2. Fallback: procurar por imagens de post/capa no HTML
+  if (!imageUrl) {
+    const containerMatch = html.match(/<(div|article|figure)\s+[^>]*(class|id)=["'][^"']*(capa|poster|post|entry|cover)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/i);
+    const searchScope = containerMatch ? containerMatch[0] : html;
+
+    const imgMatches = searchScope.match(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi);
+    if (imgMatches) {
+      for (const tag of imgMatches) {
+        const srcMatch = tag.match(/src=["']([^"']+)["']/i);
+        if (srcMatch && srcMatch[1]) {
+          const src = srcMatch[1].trim();
+          if (!src.includes('logo') && !src.includes('avatar') && !src.includes('icon') && !src.includes('banner') && !src.endsWith('.svg') && src.length > 5) {
+            imageUrl = src;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!imageUrl) return null;
+
+  // 3. Normaliza a URL para absoluta
+  try {
+    imageUrl = imageUrl.replace(/&amp;/g, '&').trim();
+    if (imageUrl.startsWith('//')) {
+      imageUrl = 'https:' + imageUrl;
+    } else if (imageUrl.startsWith('/') && pageUrl) {
+      const parsedPage = new URL(pageUrl);
+      imageUrl = `${parsedPage.protocol}//${parsedPage.host}${imageUrl}`;
+    } else if (pageUrl && !imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
+      imageUrl = new URL(imageUrl, pageUrl).href;
+    }
+    return imageUrl;
+  } catch (e) {
+    return imageUrl;
+  }
+}
+
+// Helper para extrair o título da página HTML (<title> ou <h1>)
+function extractPageTitle(html) {
+  if (!html) return '';
+  const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i) || html.match(/<h1[^>]*>(.*?)<\/h1>/i);
+  if (titleMatch && titleMatch[1]) {
+    let clean = titleMatch[1].replace(/<[^>]+>/g, '').trim().replace(/\s+/g, ' ');
+    clean = clean.replace(/\s*[-|–—]\s*(comando|torrent|baixe|download|pirate).*$/i, '').trim();
+    return clean;
+  }
+  return '';
+}
+
+// Helper para extrair o título amigável de um magnet link ou tag <a> do HTML
+function extractMagnetTitle(magnet, linkText = '', pageTitle = '') {
+  // 1. Tenta extrair do parâmetro dn= no magnet link
+  try {
+    const dnMatch = magnet.match(/[?&]dn=([^&]+)/i);
+    if (dnMatch && dnMatch[1]) {
+      const decoded = decodeURIComponent(dnMatch[1].replace(/\+/g, ' ')).trim();
+      if (decoded && decoded.length > 3 && !/^(download|magnet|torrent)$/i.test(decoded)) {
+        return decoded;
+      }
+    }
+  } catch (e) {}
+
+  // 2. Tenta extrair o texto limpo da tag <a> do HTML
+  let cleanLinkText = '';
+  if (linkText) {
+    cleanLinkText = linkText.replace(/<[^>]+>/g, '').trim().replace(/\s+/g, ' ');
+  }
+
+  const isGeneric = !cleanLinkText || /^(download|magnet|baixar|download torrent|magnet link|clique aqui|link|torrent|opção \d+|baixar torrent)$/i.test(cleanLinkText);
+
+  if (pageTitle) {
+    if (!isGeneric && cleanLinkText.length > 1 && !pageTitle.toLowerCase().includes(cleanLinkText.toLowerCase())) {
+      return `${pageTitle} - ${cleanLinkText}`;
+    }
+    return pageTitle;
+  }
+
+  if (!isGeneric && cleanLinkText.length > 2) {
+    return cleanLinkText;
+  }
+
+  // 3. Fallback: hash BTIH
+  try {
+    const xtMatch = magnet.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
+    if (xtMatch && xtMatch[1]) {
+      return `Torrent (${xtMatch[1].substring(0, 10)})`;
+    }
+  } catch (e) {}
+
+  return 'Torrent Sem Título';
+}
+
+// Extrai TODOS os magnet links e títulos de uma string HTML ou texto
+function extractAllTorrentsFromHtml(htmlOrText) {
+  const resultsMap = new Map(); // magnet -> title
+  if (!htmlOrText) return resultsMap;
+
+  const pageTitle = extractPageTitle(htmlOrText);
+
+  // Decodifica entidades HTML e URL-encoded magnets (magnet%3A%3F -> magnet:?)
+  let decoded = htmlOrText
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+
+  decoded = decoded.replace(/magnet%3A%3F/gi, 'magnet:?');
+
+  let optionCounter = 1;
+
+  // 1. Regex ampla para capturar tags <a> contendo magnet links (suporta multilinha com [\s\S]*?)
+  const aTagRegex = /<a\s+[^>]*href=["']?([^"' >]*magnet:\?xt=urn:[^"' >]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = aTagRegex.exec(decoded)) !== null) {
+    const fullUrl = match[1];
+    const linkText = match[2];
+
+    const innerMagnetMatch = fullUrl.match(/magnet:\?xt=urn:[^\s"'<>]+/i);
+    if (innerMagnetMatch) {
+      let mag = innerMagnetMatch[0];
+      try { mag = decodeURIComponent(mag); } catch (e) {}
+      mag = mag.trim();
+
+      if (!resultsMap.has(mag)) {
+        let title = extractMagnetTitle(mag, linkText, pageTitle);
+        const existingTitles = Array.from(resultsMap.values());
+        if (existingTitles.includes(title)) {
+          title = `${title} (Opção ${optionCounter})`;
+        }
+        optionCounter++;
+        resultsMap.set(mag, title);
+      }
+    }
+  }
+
+  // 2. Captura qualquer outro magnet link solto no texto/HTML
+  const globalMagnetRegex = /magnet:\?xt=urn:[^\s"'<>]+/gi;
+  let standaloneMatch;
+  while ((standaloneMatch = globalMagnetRegex.exec(decoded)) !== null) {
+    let mag = standaloneMatch[0];
+    try { mag = decodeURIComponent(mag); } catch (e) {}
+    mag = mag.trim();
+
+    if (!resultsMap.has(mag)) {
+      let title = extractMagnetTitle(mag, '', pageTitle);
+      const existingTitles = Array.from(resultsMap.values());
+      if (existingTitles.includes(title)) {
+        title = `${title} (Opção ${optionCounter})`;
+      }
+      optionCounter++;
+      resultsMap.set(mag, title);
+    }
+  }
+
+  return resultsMap;
+}
+
+// Helper para normalizar URLs e evitar duplicadas no banco
+function normalizePageUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  let trimmed = rawUrl.trim();
+  try {
+    const parsed = new URL(trimmed);
+    let normalized = `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${parsed.pathname}`;
+    if (normalized.length > 10 && normalized.endsWith('/')) {
+      normalized = normalized.slice(0, -1);
+    }
+    if (parsed.search) normalized += parsed.search;
+    return normalized;
+  } catch (e) {
+    return trimmed.endsWith('/') && trimmed.length > 10 ? trimmed.slice(0, -1) : trimmed;
+  }
+}
+
+// Adiciona torrents via Magnet Link direto ou extraindo TODOS os Magnet Links com Títulos de uma URL de página web
 app.post('/api/deluge/add-url', async (req, res) => {
   const { url } = req.body;
   if (!url || typeof url !== 'string' || !url.trim()) {
@@ -976,16 +1165,13 @@ app.post('/api/deluge/add-url', async (req, res) => {
   const inputStr = url.trim();
 
   try {
-    const magnetsFound = new Set();
-    const magnetRegex = /magnet:\?xt=urn:[^\s"'<>]+/gi;
+    const magnetsFoundMap = new Map(); // magnet -> title
 
-    // 1. Procura por Magnet Links diretos no texto informado
-    const matchesInInput = inputStr.match(magnetRegex);
-    if (matchesInInput && matchesInInput.length > 0) {
-      matchesInInput.forEach(m => magnetsFound.add(m));
-    }
+    // 1. Tenta extrair magnet links do próprio texto informado
+    const directTorrents = extractAllTorrentsFromHtml(inputStr);
+    directTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
 
-    // 2. Se for uma URL (http:// ou https://), tenta buscar o conteúdo HTML da página
+    // 2. Se for uma URL (http:// ou https://), busca o HTML da página via Fetch HTTP
     if (inputStr.startsWith('http://') || inputStr.startsWith('https://')) {
       try {
         const response = await fetch(inputStr, {
@@ -998,58 +1184,115 @@ app.post('/api/deluge/add-url', async (req, res) => {
 
         if (response.ok) {
           const html = await response.text();
-          const pageMatches = html.match(magnetRegex);
-          if (pageMatches && pageMatches.length > 0) {
-            pageMatches.forEach(m => {
-              const cleanMagnet = m.replace(/&amp;/g, '&');
-              magnetsFound.add(cleanMagnet);
-            });
-          }
+          const pageTorrents = extractAllTorrentsFromHtml(html);
+          pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
         }
       } catch (fetchErr) {
-        console.error('Erro ao acessar a URL para extrair magnet links:', fetchErr.message);
-        if (magnetsFound.size === 0) {
-          return res.status(400).json({
-            success: false,
-            error: `Não foi possível acessar a URL informada: ${fetchErr.message}`
+        console.error('Erro ao acessar a URL via fetch:', fetchErr.message);
+      }
+
+      // 3. Se nenhum magnet link foi encontrado via Fetch simples (ex: renderização por JS / protetores de link), usa Puppeteer como fallback
+      if (magnetsFoundMap.size === 0) {
+        try {
+          const puppeteer = require('puppeteer-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+          puppeteer.use(StealthPlugin());
+
+          const browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
           });
+          const page = await browser.newPage();
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+          await page.goto(inputStr, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+          await new Promise(r => setTimeout(r, 2000));
+          const renderedHtml = await page.content();
+          await browser.close();
+
+          const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
+          pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+        } catch (pupErr) {
+          console.error('Erro ao usar Puppeteer como fallback para extrair magnets:', pupErr.message);
         }
       }
     }
 
-    if (magnetsFound.size === 0) {
+    if (magnetsFoundMap.size === 0) {
       return res.status(404).json({
         success: false,
-        error: 'Nenhum Magnet Link válido foi encontrado no texto ou na página da URL fornecida.'
+        error: 'Nenhum Magnet Link foi encontrado na URL ou texto fornecido.'
       });
     }
 
-    const magnetList = Array.from(magnetsFound);
     const client = await getDelugeClient();
     const results = [];
 
-    for (const mag of magnetList) {
+    for (const [mag, title] of magnetsFoundMap.entries()) {
       try {
         const torrentId = await client.addMagnet(mag);
-        results.push({ magnet: mag, success: true, torrentId });
+        results.push({ title, magnet: mag, success: true, torrentId, alreadyExists: false });
       } catch (addErr) {
         if (addErr.message && addErr.message.includes('already in session')) {
-          results.push({ magnet: mag, success: true, alreadyExists: true });
+          results.push({ title, magnet: mag, success: true, alreadyExists: true });
         } else {
-          results.push({ magnet: mag, success: false, error: addErr.message });
+          results.push({ title, magnet: mag, success: false, error: addErr.message });
         }
+      }
+    }
+
+    const addedCount = results.filter(r => r.success && !r.alreadyExists).length;
+    const existingCount = results.filter(r => r.alreadyExists).length;
+
+    // Se o parâmetro monitor for true e for uma URL de página web, salva/atualiza sem duplicar
+    if (req.body.monitor !== false && (inputStr.startsWith('http://') || inputStr.startsWith('https://'))) {
+      try {
+        const normUrl = normalizePageUrl(inputStr);
+        let cleanTitle = 'Página de Torrent';
+        if (magnetsFoundMap.size > 0) {
+          const firstTitle = Array.from(magnetsFoundMap.values())[0];
+          if (firstTitle) cleanTitle = firstTitle.split(' - ')[0] || firstTitle;
+        }
+
+        const existing = await MonitoredPage.findOne({ where: { url: normUrl } });
+        let htmlToExtractImg = null;
+        if (typeof html !== 'undefined') htmlToExtractImg = html;
+        else if (typeof renderedHtml !== 'undefined') htmlToExtractImg = renderedHtml;
+
+        const featuredImg = htmlToExtractImg ? extractFeaturedImage(htmlToExtractImg, normUrl) : null;
+
+        if (existing) {
+          existing.monitor = true;
+          if (cleanTitle && cleanTitle !== 'Página de Torrent') existing.title = cleanTitle;
+          if (featuredImg) existing.imageUrl = featuredImg;
+          if (addedCount > 0 || (magnetsFoundMap.size > 0 && magnetsFoundMap.size !== existing.torrentsCount)) {
+            existing.torrentsCount = magnetsFoundMap.size;
+            existing.lastContentChangedAt = new Date();
+          }
+          existing.lastCheckedAt = new Date();
+          await existing.save();
+        } else {
+          await MonitoredPage.create({
+            url: normUrl,
+            title: cleanTitle,
+            imageUrl: featuredImg,
+            monitor: true,
+            torrentsCount: magnetsFoundMap.size,
+            lastContentChangedAt: magnetsFoundMap.size > 0 ? new Date() : null,
+            lastCheckedAt: new Date()
+          });
+        }
+      } catch (mErr) {
+        console.error('Erro ao salvar página para monitoramento:', mErr.message);
       }
     }
 
     await invalidateCache('deluge_torrents');
 
-    const addedCount = results.filter(r => r.success && !r.alreadyExists).length;
-    const existingCount = results.filter(r => r.alreadyExists).length;
     const failedCount = results.filter(r => !r.success).length;
 
     return res.json({
       success: true,
-      totalFound: magnetList.length,
+      totalFound: magnetsFoundMap.size,
       addedCount,
       existingCount,
       failedCount,
@@ -1058,6 +1301,176 @@ app.post('/api/deluge/add-url', async (req, res) => {
   } catch (err) {
     console.error('Erro em /api/deluge/add-url:', err);
     return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+// ==========================================
+// ENDPOINTS PARA PÁGINAS MONITORADAS (URLs)
+// ==========================================
+
+// Listar todas as páginas monitoradas (ordenadas por recência de adição de torrents / data de alteração de conteúdo)
+app.get('/api/monitored-pages', async (req, res) => {
+  try {
+    const pages = await MonitoredPage.findAll({
+      order: [
+        [sequelize.fn('COALESCE', sequelize.col('lastContentChangedAt'), sequelize.col('createdAt')), 'DESC'],
+        ['id', 'DESC']
+      ]
+    });
+    res.json({ success: true, pages });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Adicionar nova página para monitorar manualmente (com prevenção de duplicadas)
+app.post('/api/monitored-pages', async (req, res) => {
+  const { url, title, monitor } = req.body;
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return res.status(400).json({ success: false, error: 'URL é obrigatória.' });
+  }
+  try {
+    const normUrl = normalizePageUrl(url);
+    const existing = await MonitoredPage.findOne({ where: { url: normUrl } });
+    let page;
+    if (existing) {
+      existing.monitor = monitor !== false;
+      if (title) existing.title = title;
+      await existing.save();
+      page = existing;
+    } else {
+      page = await MonitoredPage.create({
+        url: normUrl,
+        title: title || 'Página de Torrent',
+        monitor: monitor !== false,
+        lastCheckedAt: new Date()
+      });
+    }
+    res.json({ success: true, page, isDuplicate: !!existing });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Alternar status de monitoramento (Toggle True/False)
+app.put('/api/monitored-pages/:id/toggle', async (req, res) => {
+  try {
+    const page = await MonitoredPage.findByPk(req.params.id);
+    if (!page) {
+      return res.status(404).json({ success: false, error: 'Página não encontrada.' });
+    }
+    page.monitor = !page.monitor;
+    await page.save();
+    res.json({ success: true, page });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Executar verificação manual imediata de 1 página
+app.post('/api/monitored-pages/:id/check', async (req, res) => {
+  try {
+    const page = await MonitoredPage.findByPk(req.params.id);
+    if (!page) {
+      return res.status(404).json({ success: false, error: 'Página não encontrada.' });
+    }
+
+    const magnetsFoundMap = new Map();
+    try {
+      const response = await fetch(page.url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        redirect: 'follow'
+      });
+      if (response.ok) {
+        const html = await response.text();
+        const pageTorrents = extractAllTorrentsFromHtml(html);
+        pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+        const pTitle = extractPageTitle(html);
+        if (pTitle) page.title = pTitle;
+      }
+    } catch (fErr) {}
+
+    if (magnetsFoundMap.size === 0) {
+      try {
+        const puppeteer = require('puppeteer-extra');
+        const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+        puppeteer.use(StealthPlugin());
+
+        const browser = await puppeteer.launch({
+          headless: 'new',
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        });
+        const pPage = await browser.newPage();
+        await pPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await pPage.goto(page.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 2000));
+        const renderedHtml = await pPage.content();
+        await browser.close();
+
+        const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
+        pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+        const pTitle = extractPageTitle(renderedHtml);
+        if (pTitle) page.title = pTitle;
+      } catch (pErr) {}
+    }
+
+    const client = await getDelugeClient().catch(() => null);
+    let addedCount = 0;
+    let existingCount = 0;
+
+    if (client && magnetsFoundMap.size > 0) {
+      for (const [mag] of magnetsFoundMap.entries()) {
+        try {
+          await client.addMagnet(mag);
+          addedCount++;
+        } catch (addErr) {
+          if (addErr.message && addErr.message.includes('already in session')) {
+            existingCount++;
+          }
+        }
+      }
+    }
+
+    page.lastCheckedAt = new Date();
+    await page.save();
+    await invalidateCache('deluge_torrents');
+
+    res.json({
+      success: true,
+      page,
+      totalFound: magnetsFoundMap.size,
+      addedCount,
+      existingCount
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Executar verificação manual imediata de TODAS as páginas ativas
+app.post('/api/monitored-pages/check-all', async (req, res) => {
+  try {
+    const result = await checkMonitoredPagesTask();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Excluir página monitorada (apaga do banco de dados)
+app.delete('/api/monitored-pages/:id', async (req, res) => {
+  try {
+    const page = await MonitoredPage.findByPk(req.params.id);
+    if (!page) {
+      return res.status(404).json({ success: false, error: 'Página não encontrada.' });
+    }
+    await page.destroy();
+    res.json({ success: true, id: Number(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -1369,6 +1782,133 @@ app.delete('/api/storage/delete', async (req, res) => {
 });
 
 
+// Função para verificar sequencialmente todas as páginas monitoradas ativas no banco de dados com pausa entre URLs
+async function checkMonitoredPagesTask() {
+  console.log('[MonitoredPages] Iniciando verificação sequencial de páginas monitoradas...');
+  try {
+    // Ordena pela data em que teve novos torrents/alteração de conteúdo por último (lastContentChangedAt DESC)
+    const pages = await MonitoredPage.findAll({
+      where: { monitor: true },
+      order: [
+        [sequelize.fn('COALESCE', sequelize.col('lastContentChangedAt'), sequelize.col('createdAt')), 'DESC'],
+        ['lastCheckedAt', 'ASC']
+      ]
+    });
+
+    if (pages.length === 0) {
+      console.log('[MonitoredPages] Nenhuma página com monitoramento ativo encontrada.');
+      return { checkedCount: 0, addedTotal: 0 };
+    }
+
+    console.log(`[MonitoredPages] Encontradas ${pages.length} páginas para verificação. Processando com pausa entre URLs...`);
+
+    let addedTotal = 0;
+    const client = await getDelugeClient().catch(() => null);
+
+    for (let i = 0; i < pages.length; i++) {
+      const page = pages[i];
+      try {
+        console.log(`[MonitoredPages] (${i + 1}/${pages.length}) Verificando URL (ID: ${page.id}): ${page.url}`);
+        const magnetsFoundMap = new Map();
+
+        // 1. Tenta fetch HTTP
+        try {
+          const response = await fetch(page.url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            },
+            redirect: 'follow'
+          });
+          if (response.ok) {
+            const html = await response.text();
+            const pageTorrents = extractAllTorrentsFromHtml(html);
+            pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+            const pTitle = extractPageTitle(html);
+            if (pTitle && pTitle !== page.title) {
+              page.title = pTitle;
+            }
+            const pImg = extractFeaturedImage(html, page.url);
+            if (pImg) {
+              page.imageUrl = pImg;
+            }
+          }
+        } catch (fErr) {
+          console.error(`[MonitoredPages] Erro no fetch de ${page.url}:`, fErr.message);
+        }
+
+        // 2. Fallback Puppeteer se nada foi retornado via Fetch
+        if (magnetsFoundMap.size === 0) {
+          try {
+            const puppeteer = require('puppeteer-extra');
+            const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+            puppeteer.use(StealthPlugin());
+
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            });
+            const pPage = await browser.newPage();
+            await pPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+            await pPage.goto(page.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+            await new Promise(r => setTimeout(r, 2000));
+            const renderedHtml = await pPage.content();
+            await browser.close();
+
+            const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
+            pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+            const pTitle = extractPageTitle(renderedHtml);
+            if (pTitle) page.title = pTitle;
+            const pImg = extractFeaturedImage(renderedHtml, page.url);
+            if (pImg) page.imageUrl = pImg;
+          } catch (pErr) {
+            console.error(`[MonitoredPages] Erro Puppeteer em ${page.url}:`, pErr.message);
+          }
+        }
+
+        // 3. Adiciona torrents no Deluge e verifica alteração na contagem
+        let pageAddedCount = 0;
+        if (client && magnetsFoundMap.size > 0) {
+          for (const [mag] of magnetsFoundMap.entries()) {
+            try {
+              await client.addMagnet(mag);
+              pageAddedCount++;
+              addedTotal++;
+            } catch (aErr) {
+              // Torrent já existente ou erro silencioso
+            }
+          }
+        }
+
+        const foundCount = magnetsFoundMap.size;
+        if (pageAddedCount > 0 || (foundCount > 0 && foundCount !== page.torrentsCount)) {
+          page.torrentsCount = foundCount;
+          page.lastContentChangedAt = new Date();
+          console.log(`[MonitoredPages] Alteração de torrents em ${page.url}! Total: ${foundCount}, Novos adicionados: ${pageAddedCount}`);
+        }
+
+        page.lastCheckedAt = new Date();
+        await page.save();
+
+        // Pausa sequencial de 3 segundos entre URLs
+        if (i < pages.length - 1) {
+          console.log('[MonitoredPages] Pausa de 3 segundos antes da próxima URL...');
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      } catch (pErr) {
+        console.error(`[MonitoredPages] Erro ao verificar página ${page.id}:`, pErr.message);
+      }
+    }
+
+    await invalidateCache('deluge_torrents');
+    console.log(`[MonitoredPages] Verificação sequencial concluída. Páginas: ${pages.length}, Torrents adicionados: ${addedTotal}`);
+    return { checkedCount: pages.length, addedTotal };
+  } catch (err) {
+    console.error('[MonitoredPages] Erro ao executar tarefa de monitoramento:', err.message);
+    return { error: err.message };
+  }
+}
+
 // Função para liberar a porta do servidor matando qualquer processo antigo
 async function liberarPortaServidor() {
   const port = process.env.PORT || 4182;
@@ -1465,6 +2005,20 @@ liberarPortaServidor().catch(err => {
     discoverDelugePath().catch(err => {
       console.error("Erro ao descobrir o caminho inicial do Deluge:", err.message);
     });
+
+    // Executa a verificação inicial das páginas monitoradas ao iniciar o servidor
+    setTimeout(() => {
+      checkMonitoredPagesTask().catch(err => {
+        console.error("Erro na verificação inicial das páginas monitoradas:", err.message);
+      });
+    }, 10000); // 10 segundos após o boot
+
+    // Agenda a verificação periódica das páginas monitoradas a cada 12 horas
+    setInterval(() => {
+      checkMonitoredPagesTask().catch(err => {
+        console.error("Erro no ciclo de 12h das páginas monitoradas:", err.message);
+      });
+    }, 12 * 60 * 60 * 1000);
 
     function obterIpLocal() {
       const { networkInterfaces } = require('os');

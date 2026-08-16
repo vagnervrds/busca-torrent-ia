@@ -18,7 +18,16 @@ let delugeEventSource = null;
 let delugeRemoveTargetId = null;
 let delugeTorrentsCache = {};
 
-
+// Função Utilitária para Sanitizar HTML
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
 // Elementos do DOM
 
@@ -230,6 +239,15 @@ const delugeAddUrlForm = document.getElementById('delugeAddUrlForm');
 const delugeUrlInput = document.getElementById('delugeUrlInput');
 const submitDelugeAddUrlBtn = document.getElementById('submitDelugeAddUrlBtn');
 const delugeAddUrlStatus = document.getElementById('delugeAddUrlStatus');
+const delugeMonitorCheck = document.getElementById('delugeMonitorCheck');
+
+// Elementos de Páginas Monitoradas
+const sidebarMonitoredBtn = document.getElementById('sidebarMonitoredBtn');
+const monitoredSection = document.getElementById('monitoredSection');
+const monitoredPagesList = document.getElementById('monitoredPagesList');
+const monitoredCountBadge = document.getElementById('monitoredCountBadge');
+const checkAllMonitoredBtn = document.getElementById('checkAllMonitoredBtn');
+const addMonitoredPageBtn = document.getElementById('addMonitoredPageBtn');
 
 const delugePanelStatusBadge = document.getElementById('delugePanelStatusBadge');
 
@@ -366,6 +384,9 @@ document.addEventListener('DOMContentLoaded', () => {
   themeToggleBtn.addEventListener('click', toggleTheme);
 
   sidebarDelugeBtn.addEventListener('click', showDelugeSection);
+  if (sidebarMonitoredBtn) sidebarMonitoredBtn.addEventListener('click', showMonitoredSection);
+  if (checkAllMonitoredBtn) checkAllMonitoredBtn.addEventListener('click', handleCheckAllMonitoredPages);
+  if (addMonitoredPageBtn) addMonitoredPageBtn.addEventListener('click', openDelugeAddUrlModal);
 
   refreshDelugeBtn.addEventListener('click', fetchDelugeTorrents);
 
@@ -728,6 +749,7 @@ function showNewSearchForm() {
   settingsSection.classList.add('hidden');
 
   delugeSection.classList.add('hidden');
+  if (monitoredSection) monitoredSection.classList.add('hidden');
 
   closeDelugeSSE();
 
@@ -796,6 +818,7 @@ function showSettingsSection() {
   settingsSection.classList.remove('hidden');
 
   delugeSection.classList.add('hidden');
+  if (monitoredSection) monitoredSection.classList.add('hidden');
 
   closeDelugeSSE();
 
@@ -2738,6 +2761,7 @@ function showDelugeSection() {
   newSearchSection.classList.add('hidden');
   activeSearchSection.classList.add('hidden');
   settingsSection.classList.add('hidden');
+  if (monitoredSection) monitoredSection.classList.add('hidden');
   delugeSection.classList.remove('hidden');
   activeSearchQueryTitle.innerText = "Gerenciador Deluge";
   
@@ -2745,6 +2769,22 @@ function showDelugeSection() {
   
   // Inicia SSE para atualização em tempo real
   setupDelugeSSE();
+}
+
+function showMonitoredSection() {
+  activeSearchId = null;
+  closeSSE();
+  closeDelugeSSE();
+
+  newSearchSection.classList.add('hidden');
+  activeSearchSection.classList.add('hidden');
+  settingsSection.classList.add('hidden');
+  delugeSection.classList.add('hidden');
+  if (monitoredSection) monitoredSection.classList.remove('hidden');
+  activeSearchQueryTitle.innerText = "Páginas Monitoradas";
+
+  renderSearchesList();
+  fetchMonitoredPages();
 }
 
 
@@ -3205,6 +3245,11 @@ function openDelugeAddUrlModal() {
     delugeAddUrlStatus.classList.add('hidden');
     delugeAddUrlStatus.innerHTML = '';
   }
+  const container = document.getElementById('delugeFoundTorrentsContainer');
+  const list = document.getElementById('delugeFoundTorrentsList');
+  if (container) container.classList.add('hidden');
+  if (list) list.innerHTML = '';
+
   delugeAddUrlModal.classList.remove('hidden');
   if (delugeUrlInput) delugeUrlInput.focus();
 }
@@ -3223,29 +3268,37 @@ async function handleDelugeAddUrlSubmit(e) {
   const origBtnText = submitDelugeAddUrlBtn.innerHTML;
   submitDelugeAddUrlBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Processando...`;
 
+  const container = document.getElementById('delugeFoundTorrentsContainer');
+  const countEl = document.getElementById('delugeFoundTorrentsCount');
+  const listEl = document.getElementById('delugeFoundTorrentsList');
+
+  if (container) container.classList.add('hidden');
+  if (listEl) listEl.innerHTML = '';
+
   if (delugeAddUrlStatus) {
     delugeAddUrlStatus.classList.remove('hidden');
     delugeAddUrlStatus.className = "text-xs p-3 rounded-xl flex items-center gap-2 font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300";
-    delugeAddUrlStatus.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-emerald-500"></i> Analisando link/URL e adicionando ao Deluge...`;
+    delugeAddUrlStatus.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-emerald-500"></i> Extraindo torrents e adicionando ao Deluge...`;
   }
 
   try {
+    const isMonitorChecked = delugeMonitorCheck ? delugeMonitorCheck.checked : true;
     const res = await fetch('/api/deluge/add-url', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: urlVal })
+      body: JSON.stringify({ url: urlVal, monitor: isMonitorChecked })
     });
 
     const data = await res.json();
 
     if (data.success) {
-      const { totalFound, addedCount, existingCount } = data;
+      const { totalFound, addedCount, existingCount, results } = data;
       let msg = '';
       if (addedCount > 0) {
-        msg = `${addedCount} torrent(s) adicionado(s) com sucesso!`;
+        msg = `${addedCount} torrent(s) adicionado(s) com sucesso para download!`;
         if (existingCount > 0) msg += ` (${existingCount} já existia(m))`;
       } else if (existingCount > 0) {
-        msg = `Os torrents encontrados (${existingCount}) já estão na fila do Deluge.`;
+        msg = `Os ${existingCount} torrent(s) encontrado(s) já estão adicionados no Deluge.`;
       } else {
         msg = `Nenhum torrent novo foi adicionado.`;
       }
@@ -3255,12 +3308,46 @@ async function handleDelugeAddUrlSubmit(e) {
         delugeAddUrlStatus.innerHTML = `<i class="ph-bold ph-check-circle text-base"></i> ${msg}`;
       }
 
+      // Renderiza a lista de torrents com seus títulos e status
+      if (results && results.length > 0 && listEl) {
+        if (countEl) countEl.innerText = totalFound;
+
+        listEl.innerHTML = results.map(item => {
+          let badgeHtml = '';
+          if (item.success && !item.alreadyExists) {
+            badgeHtml = `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1"><i class="ph-bold ph-check text-[10px]"></i> Baixando</span>`;
+          } else if (item.alreadyExists) {
+            badgeHtml = `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 flex items-center gap-1"><i class="ph-bold ph-warning text-[10px]"></i> No Deluge</span>`;
+          } else {
+            badgeHtml = `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 flex items-center gap-1" title="${escapeHtml(item.error || '')}"><i class="ph-bold ph-x text-[10px]"></i> Erro</span>`;
+          }
+
+          const safeTitle = escapeHtml(item.title || 'Torrent Sem Título');
+          const magnetPreview = escapeHtml(item.magnet || '');
+
+          return `
+            <div class="p-3 bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs transition-all hover:border-emerald-500/40">
+              <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                <div class="p-2 bg-emerald-500/10 text-emerald-500 rounded-lg shrink-0">
+                  <i class="ph-bold ph-magnet text-sm"></i>
+                </div>
+                <div class="truncate">
+                  <span class="font-bold text-slate-800 dark:text-slate-100 block truncate" title="${safeTitle}">${safeTitle}</span>
+                  <span class="text-[10px] font-mono text-slate-400 truncate block opacity-75">${magnetPreview.substring(0, 50)}...</span>
+                </div>
+              </div>
+              <div class="shrink-0">
+                ${badgeHtml}
+              </div>
+            </div>
+          `;
+        }).join('');
+
+        if (container) container.classList.remove('hidden');
+      }
+
       if (typeof fetchDelugeTorrents === 'function') fetchDelugeTorrents();
       if (typeof showDelugeToast === 'function') showDelugeToast(msg, addedCount > 0 ? 'success' : 'warning');
-
-      setTimeout(() => {
-        closeDelugeAddUrlModal();
-      }, 1500);
     } else {
       if (delugeAddUrlStatus) {
         delugeAddUrlStatus.className = "text-xs p-3 rounded-xl flex items-center gap-2 font-medium bg-red-500/10 text-red-650 dark:text-red-400 border border-red-500/20";
@@ -4085,4 +4172,203 @@ async function cancelBatchAndClose() {
   }
   batchAnalysisModal.classList.add('hidden');
   await fetchSources();
+}
+
+// --- FUNÇÕES DE GERENCIAMENTO DE PÁGINAS MONITORADAS ---
+
+async function fetchMonitoredPages() {
+  if (!monitoredPagesList) return;
+
+  try {
+    const res = await fetch('/api/monitored-pages');
+    const data = await res.json();
+
+    if (data.success) {
+      renderMonitoredPagesList(data.pages || []);
+    } else {
+      if (typeof showDelugeToast === 'function') showDelugeToast(data.error || 'Erro ao carregar páginas monitoradas', 'error');
+    }
+  } catch (err) {
+    if (typeof showDelugeToast === 'function') showDelugeToast('Erro ao buscar páginas monitoradas: ' + err.message, 'error');
+  }
+}
+
+function renderMonitoredPagesList(pages) {
+  if (!monitoredPagesList) return;
+  if (monitoredCountBadge) monitoredCountBadge.innerText = `${pages.length} Página(s)`;
+
+  if (pages.length === 0) {
+    monitoredPagesList.innerHTML = `
+      <div class="p-8 text-center text-slate-400 dark:text-slate-500">
+        <i class="ph-bold ph-desktop-tower text-3xl mb-2 text-emerald-500 opacity-60"></i>
+        <h4 class="font-bold text-slate-700 dark:text-slate-350">Nenhuma página sendo monitorada</h4>
+        <p class="text-xs max-w-sm mx-auto mt-1">Adicione a URL de páginas de torrents para capturar automaticamente novos episódios ou lançamentos a cada 12h.</p>
+      </div>
+    `;
+    return;
+  }
+
+  monitoredPagesList.innerHTML = pages.map(page => {
+    const safeTitle = escapeHtml(page.title || 'Página de Torrent');
+    const safeUrl = escapeHtml(page.url);
+
+    let lastCheckedText = 'Nunca verificado';
+    if (page.lastCheckedAt) {
+      const d = new Date(page.lastCheckedAt);
+      lastCheckedText = d.toLocaleString('pt-BR');
+    }
+
+    let lastChangedText = 'Sem novidades';
+    if (page.lastContentChangedAt) {
+      const dChange = new Date(page.lastContentChangedAt);
+      lastChangedText = dChange.toLocaleString('pt-BR');
+    }
+
+    const isMonitored = page.monitor !== false;
+
+    const hasImage = page.imageUrl && typeof page.imageUrl === 'string' && page.imageUrl.trim().length > 5;
+    const safeImage = hasImage ? escapeHtml(page.imageUrl) : '';
+
+    const imageHtml = hasImage ? `
+      <div class="relative shrink-0">
+        <img src="${safeImage}" alt="${safeTitle}" class="w-14 h-20 sm:w-16 sm:h-22 object-cover rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm bg-slate-100 dark:bg-slate-800" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'w-14 h-20 sm:w-16 sm:h-22 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-center text-slate-400\\'><i class=\\'ph-bold ph-image text-xl\\'></i></div>';" />
+      </div>
+    ` : `
+      <div class="w-14 h-20 sm:w-16 sm:h-22 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-center text-slate-400 shrink-0">
+        <i class="ph-bold ph-film-strip text-2xl opacity-60 text-brand-500"></i>
+      </div>
+    `;
+
+    return `
+      <div class="p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 hover:bg-slate-50/50 dark:hover:bg-slate-950/40 transition-colors">
+        <div class="flex items-start sm:items-center gap-3.5 min-w-0 flex-1">
+          ${imageHtml}
+          <div class="space-y-1.5 min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <h4 class="font-bold text-sm text-slate-800 dark:text-slate-100 truncate max-w-md" title="${safeTitle}">${safeTitle}</h4>
+              <span class="px-2.5 py-0.5 text-[10px] font-bold rounded-full ${isMonitored ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}">
+                ${isMonitored ? 'Ativo (12h)' : 'Pausado'}
+              </span>
+              <span class="px-2.5 py-0.5 text-[10px] font-bold rounded-full bg-brand-500/10 text-brand-600 dark:text-brand-400 border border-brand-500/20 flex items-center gap-1">
+                <i class="ph-bold ph-magnet text-[10px]"></i> ${page.torrentsCount || 0} Magnet(s)
+              </span>
+            </div>
+            <div class="flex items-center gap-3 text-xs text-slate-400 dark:text-slate-500 flex-wrap">
+              <a href="${safeUrl}" target="_blank" class="truncate text-brand-600 dark:text-brand-400 hover:underline flex items-center gap-1 max-w-md">
+                <i class="ph-bold ph-link-simple shrink-0"></i> <span class="truncate">${safeUrl}</span>
+              </a>
+              <span class="shrink-0">• Novos torrents em: <strong class="text-slate-700 dark:text-slate-300 font-semibold">${lastChangedText}</strong></span>
+              <span class="shrink-0">• Checagem: ${lastCheckedText}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
+          <!-- Toggle Monitorar -->
+          <label class="relative inline-flex items-center cursor-pointer" title="${isMonitored ? 'Desativar monitoramento automático' : 'Ativar monitoramento automático'}">
+            <input type="checkbox" class="sr-only peer" ${isMonitored ? 'checked' : ''} onchange="toggleMonitoredPageStatus(${page.id})" />
+            <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-800 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-slate-600 peer-checked:bg-emerald-500"></div>
+          </label>
+
+          <!-- Botão Verificar Agora -->
+          <button onclick="checkMonitoredPageNow(${page.id}, this)" class="py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all" title="Verificar novos torrents nesta página agora">
+            <i class="ph-bold ph-arrows-counter-clockwise"></i> Verificar Agora
+          </button>
+
+          <!-- Botão Excluir -->
+          <button onclick="deleteMonitoredPage(${page.id})" class="py-2 px-3 bg-red-500/10 hover:bg-red-500/20 text-red-650 dark:text-red-400 border border-red-500/20 hover:border-red-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all" title="Excluir página do banco de dados">
+            <i class="ph-bold ph-trash"></i> Excluir
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function toggleMonitoredPageStatus(id) {
+  try {
+    const res = await fetch(`/api/monitored-pages/${id}/toggle`, { method: 'PUT' });
+    const data = await res.json();
+    if (data.success) {
+      if (typeof showDelugeToast === 'function') showDelugeToast(`Status de monitoramento alterado com sucesso!`, 'success');
+      fetchMonitoredPages();
+    } else {
+      if (typeof showDelugeToast === 'function') showDelugeToast(data.error || 'Erro ao alterar status', 'error');
+    }
+  } catch (err) {
+    if (typeof showDelugeToast === 'function') showDelugeToast('Erro de conexão: ' + err.message, 'error');
+  }
+}
+
+async function checkMonitoredPageNow(id, btnEl) {
+  const origHtml = btnEl ? btnEl.innerHTML : '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Checando...`;
+  }
+
+  try {
+    const res = await fetch(`/api/monitored-pages/${id}/check`, { method: 'POST' });
+    const data = await res.json();
+
+    if (data.success) {
+      const msg = `Verificação concluída! ${data.addedCount} novo(s) torrent(s) adicionado(s) (${data.existingCount} já existia(m)).`;
+      if (typeof showDelugeToast === 'function') showDelugeToast(msg, data.addedCount > 0 ? 'success' : 'warning');
+      fetchMonitoredPages();
+      if (typeof fetchDelugeTorrents === 'function') fetchDelugeTorrents();
+    } else {
+      if (typeof showDelugeToast === 'function') showDelugeToast(data.error || 'Erro ao verificar página', 'error');
+    }
+  } catch (err) {
+    if (typeof showDelugeToast === 'function') showDelugeToast('Erro de conexão: ' + err.message, 'error');
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = origHtml;
+    }
+  }
+}
+
+async function handleCheckAllMonitoredPages() {
+  if (!checkAllMonitoredBtn) return;
+  const origHtml = checkAllMonitoredBtn.innerHTML;
+  checkAllMonitoredBtn.disabled = true;
+  checkAllMonitoredBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Verificando todas...`;
+
+  try {
+    const res = await fetch('/api/monitored-pages/check-all', { method: 'POST' });
+    const data = await res.json();
+
+    if (data.success) {
+      if (typeof showDelugeToast === 'function') showDelugeToast(`Todas as páginas foram verificadas! ${data.addedTotal || 0} novo(s) torrent(s) adicionado(s).`, 'success');
+      fetchMonitoredPages();
+      if (typeof fetchDelugeTorrents === 'function') fetchDelugeTorrents();
+    } else {
+      if (typeof showDelugeToast === 'function') showDelugeToast(data.error || 'Erro ao verificar páginas monitoradas', 'error');
+    }
+  } catch (err) {
+    if (typeof showDelugeToast === 'function') showDelugeToast('Erro de conexão: ' + err.message, 'error');
+  } finally {
+    checkAllMonitoredBtn.disabled = false;
+    checkAllMonitoredBtn.innerHTML = origHtml;
+  }
+}
+
+async function deleteMonitoredPage(id) {
+  const confirmed = await confirm('Deseja realmente excluir esta página do monitoramento? Ela será removida do banco de dados.', 'Excluir Página');
+  if (!confirmed) return;
+
+  try {
+    const res = await fetch(`/api/monitored-pages/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+
+    if (data.success) {
+      if (typeof showDelugeToast === 'function') showDelugeToast('Página removida do monitoramento com sucesso!', 'success');
+      fetchMonitoredPages();
+    } else {
+      if (typeof showDelugeToast === 'function') showDelugeToast(data.error || 'Erro ao excluir página', 'error');
+    }
+  } catch (err) {
+    if (typeof showDelugeToast === 'function') showDelugeToast('Erro de conexão: ' + err.message, 'error');
+  }
 }
