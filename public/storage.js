@@ -116,6 +116,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const selectedCountSpan = document.getElementById('selected-count');
   const checkboxSelectAll = document.getElementById('checkbox-select-all');
 
+  // Search & Recursive Filter Elements
+  const fileSearchInput = document.getElementById('file-search-input');
+  const checkboxRecursiveSearch = document.getElementById('checkbox-recursive-search');
+  const btnClearSearch = document.getElementById('btn-clear-search');
+  const searchCountBadge = document.getElementById('search-count-badge');
+
+
   // Custom Deletion Confirmation Modal
   const deleteConfirmModal = document.getElementById('delete-confirm-modal');
   const deleteModalList = document.getElementById('delete-modal-list');
@@ -153,6 +160,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // Handle window resize
       window.addEventListener('resize', () => {
         if (myChart) myChart.resize();
+        setupMarqueeOverflowCheck();
       });
     }
   }
@@ -326,6 +334,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Helper for recursive search in subfolders
+  function collectMatchingDescendants(node, query, results = []) {
+    if (!node || !node.children) return results;
+    for (const child of node.children) {
+      if (child.name.toLowerCase().includes(query)) {
+        results.push(child);
+      }
+      if (child.children) {
+        collectMatchingDescendants(child, query, results);
+      }
+    }
+    return results;
+  }
+
   // Render file manager navigator table rows
   function renderCurrentFolder() {
     fileListBody.innerHTML = '';
@@ -333,7 +355,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     renderBreadcrumbs();
 
-    // Reset selection state when entering a folder
+    // Reset selection state when entering a folder / searching
     checkboxSelectAll.checked = false;
     checkboxSelectAll.indeterminate = false;
     selectedPaths.clear();
@@ -346,16 +368,53 @@ document.addEventListener('DOMContentLoaded', () => {
       btnGoBack.classList.add('hidden');
     }
 
-    const items = currentFolderNode.children || [];
+    const searchTerm = fileSearchInput ? fileSearchInput.value.trim() : '';
+    const isRecursive = checkboxRecursiveSearch ? checkboxRecursiveSearch.checked : false;
+
+    // Toggle clear search button visibility
+    if (btnClearSearch) {
+      if (searchTerm) {
+        btnClearSearch.classList.remove('hidden');
+      } else {
+        btnClearSearch.classList.add('hidden');
+      }
+    }
+
+    let items = [];
+    if (!searchTerm) {
+      items = currentFolderNode.children || [];
+      if (searchCountBadge) searchCountBadge.classList.add('hidden');
+    } else {
+      const query = searchTerm.toLowerCase();
+      if (isRecursive) {
+        items = collectMatchingDescendants(currentFolderNode, query);
+      } else {
+        items = (currentFolderNode.children || []).filter(item => item.name.toLowerCase().includes(query));
+      }
+      if (searchCountBadge) {
+        searchCountBadge.textContent = `${items.length} encontrado(s)`;
+        searchCountBadge.classList.remove('hidden');
+      }
+    }
     
     if (items.length === 0) {
-      fileListBody.innerHTML = `
-        <tr>
-          <td colspan="4" class="text-center py-10 text-slate-400 dark:text-slate-500 text-xs md:text-sm">
-            <i class="ph-bold ph-folder-open text-3xl mb-1.5 block opacity-50 text-slate-500"></i>
-            Esta pasta está vazia
-          </td>
-        </tr>`;
+      if (searchTerm) {
+        fileListBody.innerHTML = `
+          <tr>
+            <td colspan="4" class="text-center py-10 text-slate-400 dark:text-slate-500 text-xs md:text-sm">
+              <i class="ph-bold ph-magnifying-glass text-3xl mb-1.5 block opacity-50 text-slate-500"></i>
+              Nenhum item encontrado para "<span class="font-bold">${searchTerm.replace(/</g, "&lt;")}</span>"${isRecursive ? ' (busca em subpastas)' : ''}
+            </td>
+          </tr>`;
+      } else {
+        fileListBody.innerHTML = `
+          <tr>
+            <td colspan="4" class="text-center py-10 text-slate-400 dark:text-slate-500 text-xs md:text-sm">
+              <i class="ph-bold ph-folder-open text-3xl mb-1.5 block opacity-50 text-slate-500"></i>
+              Esta pasta está vazia
+            </td>
+          </tr>`;
+      }
       return;
     }
 
@@ -376,7 +435,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Checkbox column
       const tdCheck = document.createElement('td');
-      tdCheck.className = "py-3 px-4 w-10";
+      tdCheck.className = "py-3 px-2 sm:px-4 w-8 sm:w-10";
       
       const chk = document.createElement('input');
       chk.type = "checkbox";
@@ -387,28 +446,58 @@ document.addEventListener('DOMContentLoaded', () => {
       tdCheck.appendChild(chk);
       tr.appendChild(tdCheck);
 
-      const icon = isFolder
+      const iconHtml = isFolder
         ? '<i class="ph-fill ph-folder text-amber-500 text-lg flex-shrink-0"></i>'
         : '<i class="ph-fill ph-file text-slate-400 dark:text-slate-500 text-lg flex-shrink-0"></i>';
 
       // Name column
       const tdName = document.createElement('td');
-      tdName.className = "py-3 px-4 font-medium text-xs md:text-sm max-w-[200px] sm:max-w-xs md:max-w-md lg:max-w-xl";
+      tdName.className = "py-3 px-2 sm:px-4 font-medium text-xs md:text-sm min-w-0 max-w-[180px] sm:max-w-xs md:max-w-md lg:max-w-xl";
       
       const wrapper = document.createElement('div');
-      wrapper.className = "flex items-center gap-2.5 overflow-hidden";
+      wrapper.className = "flex items-center gap-2 overflow-hidden min-w-0 w-full";
       
       const nameBtn = document.createElement('button');
       nameBtn.type = "button";
       nameBtn.className = isFolder
-        ? "text-left text-slate-800 dark:text-slate-200 hover:text-brand-500 font-semibold focus:outline-none transition-colors flex items-center gap-2 overflow-hidden w-full"
-        : "text-left text-slate-650 dark:text-slate-400 font-normal pointer-events-none flex items-center gap-2 overflow-hidden w-full";
-      nameBtn.innerHTML = `${icon} <span class="truncate align-middle">${item.name}</span>`;
+        ? "text-left text-slate-800 dark:text-slate-200 hover:text-brand-500 font-semibold focus:outline-none transition-colors flex items-center gap-2 overflow-hidden min-w-0 w-full"
+        : "text-left text-slate-650 dark:text-slate-400 font-normal pointer-events-none flex items-center gap-2 overflow-hidden min-w-0 w-full";
+      
+      const iconSpan = document.createElement('span');
+      iconSpan.className = "flex-shrink-0 inline-flex items-center";
+      iconSpan.innerHTML = iconHtml;
+
+      const marqueeContainer = document.createElement('div');
+      marqueeContainer.className = "name-marquee-container flex-1 overflow-hidden relative align-middle min-w-0";
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = "name-text inline-block whitespace-nowrap";
+      nameSpan.textContent = item.name;
+
+      marqueeContainer.appendChild(nameSpan);
+
+      // If recursive search is active and item is from a subfolder, show relative path
+      if (searchTerm && isRecursive && item.path && currentFolderNode.path) {
+        let relPath = item.path;
+        if (relPath.startsWith(currentFolderNode.path)) {
+          relPath = relPath.substring(currentFolderNode.path.length).replace(/^[/\\]/, '');
+        }
+        if (relPath && relPath !== item.name) {
+          const subPathSpan = document.createElement('div');
+          subPathSpan.className = "text-[10px] text-slate-400 dark:text-slate-500 font-mono truncate max-w-full font-normal";
+          subPathSpan.textContent = '📁 ' + relPath;
+          marqueeContainer.appendChild(subPathSpan);
+        }
+      }
+
+      nameBtn.appendChild(iconSpan);
+      nameBtn.appendChild(marqueeContainer);
 
       if (isFolder) {
         nameBtn.addEventListener('click', () => {
           navigationHistory.push(currentFolderNode);
           currentFolderNode = item;
+          if (fileSearchInput) fileSearchInput.value = '';
           renderCurrentFolder();
         });
       }
@@ -419,13 +508,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Size column
       const tdSize = document.createElement('td');
-      tdSize.className = "py-3 px-4 text-right font-semibold text-slate-600 dark:text-slate-400 text-xs md:text-sm whitespace-nowrap";
+      tdSize.className = "py-3 px-2 sm:px-4 text-right font-semibold text-slate-600 dark:text-slate-400 text-xs md:text-sm whitespace-nowrap w-20 sm:w-28";
       tdSize.textContent = formatSize(item.value);
       tr.appendChild(tdSize);
 
       // Actions column
       const tdActions = document.createElement('td');
-      tdActions.className = "py-3 px-4 text-right";
+      tdActions.className = "py-3 px-2 sm:px-4 text-right w-12 sm:w-16";
       
       const delBtn = document.createElement('button');
       delBtn.type = "button";
@@ -442,6 +531,29 @@ document.addEventListener('DOMContentLoaded', () => {
       tr.appendChild(tdActions);
 
       fileListBody.appendChild(tr);
+    });
+
+    // Check and trigger marquee animation for overflowing text
+    requestAnimationFrame(() => {
+      setupMarqueeOverflowCheck();
+    });
+  }
+
+  function setupMarqueeOverflowCheck() {
+    const containers = fileListBody.querySelectorAll('.name-marquee-container');
+    containers.forEach(container => {
+      const span = container.querySelector('.name-text');
+      if (span && container) {
+        container.classList.remove('is-overflowing');
+        const overflowDist = span.scrollWidth - container.clientWidth;
+        if (overflowDist > 3) {
+          const dist = overflowDist + 20;
+          const duration = Math.max(4, Math.round(dist / 22));
+          container.style.setProperty('--marquee-dist', `-${dist}px`);
+          container.style.setProperty('--marquee-duration', `${duration}s`);
+          container.classList.add('is-overflowing');
+        }
+      }
     });
   }
 
@@ -801,10 +913,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Custom confirmation modal action events
-  btnDeleteCancel.addEventListener('click', closeDeleteConfirm);
-  btnDeleteConfirm.addEventListener('click', executeDeletion);
+  // Search input & recursive filter events
+  if (fileSearchInput) {
+    fileSearchInput.addEventListener('input', () => renderCurrentFolder());
+  }
+  if (checkboxRecursiveSearch) {
+    checkboxRecursiveSearch.addEventListener('change', () => renderCurrentFolder());
+  }
+  if (btnClearSearch) {
+    btnClearSearch.addEventListener('click', () => {
+      fileSearchInput.value = '';
+      renderCurrentFolder();
+    });
+  }
 
   // Initial load
   loadTree();
+
 });

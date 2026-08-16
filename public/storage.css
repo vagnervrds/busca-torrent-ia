@@ -49,3 +49,34 @@
 .animate-scaleIn {
   animation: scaleIn 0.2s ease-out forwards;
 }
+
+/* Marquee / Horizontal Scrolling animation for long file & folder names */
+.name-marquee-container {
+  position: relative;
+  overflow: hidden;
+  white-space: nowrap;
+  width: 100%;
+  mask-image: linear-gradient(to right, black 85%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 85%, transparent 100%);
+}
+
+.name-marquee-container.is-overflowing .name-text {
+  display: inline-block;
+  white-space: nowrap;
+  animation: marquee-bounce var(--marquee-duration, 8s) ease-in-out infinite alternate;
+}
+
+.name-marquee-container.is-overflowing:hover .name-text,
+.name-marquee-container.is-overflowing:active .name-text {
+  animation-play-state: running;
+}
+
+@keyframes marquee-bounce {
+  0%, 20% {
+    transform: translateX(0);
+  }
+  80%, 100% {
+    transform: translateX(var(--marquee-dist, -50%));
+  }
+}
+

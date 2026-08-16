@@ -351,8 +351,11 @@ async function initDatabase() {
     { key: 'aiUrl', value: 'http://localhost:8045/v1' },
     { key: 'aiToken', value: '' },
     { key: 'aiModel', value: 'gemini-3-flash' },
-    { key: 'preferredLanguage', value: 'Português' },
-    { key: 'preferredResolution', value: '1080p' }
+    { key: 'preferredAudioLanguage', value: 'Português (Dublado)' },
+    { key: 'preferredSubtitleLanguage', value: 'Português (PT-BR)' },
+    { key: 'preferredResolution', value: '1080p' },
+    { key: 'autoDeleteOldFiles', value: 'true' },
+    { key: 'minFreeSpaceGB', value: '4' }
   ];
   
   for (const setting of defaultSettings) {

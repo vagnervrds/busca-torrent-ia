@@ -453,15 +453,20 @@ document.addEventListener('DOMContentLoaded', () => {
   
 
   // Submit de Formulários de Configurações
-
-  settingsForm.addEventListener('submit', handleSettingsSubmit);
+  if (settingsForm) {
+    settingsForm.addEventListener('submit', (e) => e.preventDefault());
+  }
 
   const setDubladoBtn = document.getElementById('setDubladoBtn');
   if (setDubladoBtn) {
     setDubladoBtn.addEventListener('click', () => {
-      const preferredLanguage = document.getElementById('preferredLanguage');
-      if (preferredLanguage) {
-        preferredLanguage.value = 'somente dublado';
+      const preferredAudioLanguage = document.getElementById('preferredAudioLanguage');
+      if (preferredAudioLanguage) {
+        preferredAudioLanguage.value = 'Português (Dublado)';
+      }
+      const preferredSubtitleLanguage = document.getElementById('preferredSubtitleLanguage');
+      if (preferredSubtitleLanguage) {
+        preferredSubtitleLanguage.value = 'Português (PT-BR)';
       }
     });
   }
@@ -848,19 +853,37 @@ async function fetchSettings() {
 
     const config = await res.json();
 
-    
+    const setVal = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.value = val;
+    };
 
-    document.getElementById('aiProvider').value = config.aiProvider || 'openai';
+    setVal('aiProvider', config.aiProvider || 'openai');
+    setVal('aiModel', config.aiModel || 'gemini-3-flash');
+    setVal('aiUrl', config.aiUrl || '');
+    setVal('aiToken', config.aiToken || '');
+    setVal('preferredAudioLanguage', config.preferredAudioLanguage || 'Português (Dublado)');
+    setVal('preferredSubtitleLanguage', config.preferredSubtitleLanguage || 'Português (PT-BR)');
+    setVal('preferredResolution', config.preferredResolution || '1080p');
 
-    document.getElementById('aiModel').value = config.aiModel || 'gemini-3-flash';
+    const autoDelCheck = document.getElementById('autoDeleteOldFiles');
+    if (autoDelCheck) {
+      autoDelCheck.checked = config.autoDeleteOldFiles !== undefined ? (config.autoDeleteOldFiles === 'true' || config.autoDeleteOldFiles === true) : true;
+    }
 
-    document.getElementById('aiUrl').value = config.aiUrl || '';
+    const minFreeInput = document.getElementById('minFreeSpaceGB');
+    if (minFreeInput) {
+      minFreeInput.value = config.minFreeSpaceGB !== undefined ? config.minFreeSpaceGB : '4';
+    }
 
-    document.getElementById('aiToken').value = config.aiToken || '';
-
-    document.getElementById('preferredLanguage').value = config.preferredLanguage || 'Português';
-
-    document.getElementById('preferredResolution').value = config.preferredResolution || '1080p';
+    const delugePathEl = document.getElementById('delugeDownloadPath');
+    if (delugePathEl) {
+      if (config.deluge_download_path) {
+        delugePathEl.textContent = config.deluge_download_path;
+      } else {
+        refreshStoragePath();
+      }
+    }
 
   } catch (err) {
 
@@ -870,47 +893,94 @@ async function fetchSettings() {
 
 }
 
+// Helper genérico para salvar blocos de configurações independentes com feedback visual
+async function savePartialSettings(payload, btn, defaultLabelText) {
+  if (!btn) return;
+  if (btn.disabled) return;
 
-
-// Salva as configurações gerais
-
-async function handleSettingsSubmit(e) {
-  e.preventDefault();
-
-  const submitBtn = settingsForm.querySelector('button[type="submit"]');
-  if (submitBtn) {
-    if (submitBtn.disabled) return;
-    submitBtn.disabled = true;
-    submitBtn.dataset.originalHtml = submitBtn.innerHTML;
-    submitBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Gravando...`;
-  }
-
-  const config = {
-    aiProvider: document.getElementById('aiProvider').value,
-    aiModel: document.getElementById('aiModel').value.trim(),
-    aiUrl: document.getElementById('aiUrl').value.trim(),
-    aiToken: document.getElementById('aiToken').value.trim(),
-    preferredLanguage: document.getElementById('preferredLanguage').value.trim(),
-    preferredResolution: document.getElementById('preferredResolution').value
-  };
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Salvando...`;
 
   try {
     const res = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config)
+      body: JSON.stringify(payload)
     });
-    
-    if (!res.ok) throw new Error("Erro ao gravar dados");
-    const data = await res.json();
-    await alert(data.message || "Configurações gravadas com sucesso.");
+
+    if (!res.ok) throw new Error("Erro ao salvar no servidor");
+
+    btn.innerHTML = `<i class="ph-bold ph-check text-sm"></i> Configurações Salvas!`;
+    btn.classList.add('bg-emerald-600', 'hover:bg-emerald-700');
+
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+      btn.classList.remove('bg-emerald-600', 'hover:bg-emerald-700');
+    }, 2000);
   } catch (err) {
-    await alert("Erro ao salvar: " + err.message);
-  } finally {
-    if (submitBtn) {
-      submitBtn.disabled = false;
-      submitBtn.innerHTML = submitBtn.dataset.originalHtml || submitBtn.innerHTML;
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    await alert("Erro ao salvar configurações: " + err.message);
+  }
+}
+
+// Salvar Configurações de IA
+async function saveAiSettings(btn) {
+  const payload = {
+    aiProvider: document.getElementById('aiProvider').value,
+    aiModel: document.getElementById('aiModel').value.trim(),
+    aiUrl: document.getElementById('aiUrl').value.trim(),
+    aiToken: document.getElementById('aiToken').value.trim()
+  };
+  await savePartialSettings(payload, btn, "IA");
+}
+
+// Salvar Preferências de Idioma e Mídia
+async function saveLanguageSettings(btn) {
+  const payload = {
+    preferredAudioLanguage: document.getElementById('preferredAudioLanguage').value.trim(),
+    preferredSubtitleLanguage: document.getElementById('preferredSubtitleLanguage').value.trim(),
+    preferredResolution: document.getElementById('preferredResolution').value
+  };
+  await savePartialSettings(payload, btn, "Idiomas");
+}
+
+// Salvar Configurações de Espaço em Disco
+async function saveStorageSettings(btn) {
+  const autoDelCheck = document.getElementById('autoDeleteOldFiles');
+  const minFreeInput = document.getElementById('minFreeSpaceGB');
+
+  const payload = {
+    autoDeleteOldFiles: autoDelCheck ? (autoDelCheck.checked ? 'true' : 'false') : 'true',
+    minFreeSpaceGB: minFreeInput ? minFreeInput.value.trim() : '4'
+  };
+
+  await savePartialSettings(payload, btn, "Espaço");
+}
+
+// Redescobrir caminho da pasta do Deluge
+async function refreshStoragePath() {
+  const btn = document.getElementById('btnRefreshStoragePath');
+  const pathEl = document.getElementById('delugeDownloadPath');
+  const icon = btn ? btn.querySelector('i') : null;
+  if (icon) icon.classList.add('animate-spin');
+  if (pathEl) pathEl.textContent = 'Redescobrindo caminho do Deluge...';
+
+  try {
+    const res = await fetch('/api/storage/discover-path', { method: 'POST' });
+    const data = await res.json();
+    if (data.success && data.path) {
+      if (pathEl) pathEl.textContent = data.path;
+    } else {
+      if (pathEl) pathEl.textContent = 'Não foi possível encontrar a pasta no Deluge';
     }
+  } catch (err) {
+    console.error('Erro ao redescobrir caminho do Deluge:', err);
+    if (pathEl) pathEl.textContent = 'Erro ao consultar caminho';
+  } finally {
+    if (icon) icon.classList.remove('animate-spin');
   }
 }
 
@@ -1054,8 +1124,6 @@ async function fetchSources() {
 
     searchSources = await res.json();
 
-    
-
     renderSourcesTable();
 
   } catch (err) {
@@ -1066,11 +1134,14 @@ async function fetchSources() {
 
 }
 
-
-
-// Renderiza a lista de fontes na tabela do frontend
-
 function renderSourcesTable() {
+
+  const sourcesCountBadge = document.getElementById('sourcesCountBadge');
+  if (sourcesCountBadge) {
+    const activeCount = searchSources.filter(s => s.isActive).length;
+    sourcesCountBadge.textContent = `${activeCount}/${searchSources.length} ativos`;
+    sourcesCountBadge.classList.remove('hidden');
+  }
 
   if (searchSources.length === 0) {
 
@@ -1078,11 +1149,23 @@ function renderSourcesTable() {
 
       <tr>
 
-        <td colspan="5" class="py-8 text-center text-slate-400 dark:text-slate-500 text-xs">
+        <td colspan="5" class="py-12 px-6 text-center text-slate-400 dark:text-slate-500">
 
-          <i class="ph-bold ph-globe text-xl block mb-1 opacity-50"></i>
+          <div class="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mx-auto mb-3 text-slate-400">
 
-          Nenhum site cadastrado
+            <i class="ph-bold ph-globe text-2xl opacity-60"></i>
+
+          </div>
+
+          <p class="font-bold text-slate-700 dark:text-slate-300 text-sm">Nenhum site cadastrado</p>
+
+          <p class="text-xs text-slate-400 dark:text-slate-500 mt-1 max-w-xs mx-auto">Cadastre ou importe fontes de busca para permitir que a IA encontre torrents.</p>
+
+          <button onclick="openSourceModal()" class="mt-4 py-2 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs transition-all inline-flex items-center gap-1.5 shadow-sm">
+
+            <i class="ph-bold ph-plus-circle text-sm"></i> Cadastrar Primeira Fonte
+
+          </button>
 
         </td>
 
@@ -1098,81 +1181,119 @@ function renderSourcesTable() {
 
     // Badges de tipos de conteúdos
 
-    const typeBadges = source.contentTypes.map(t => {
+    const typeBadges = (source.contentTypes || []).map(t => {
 
       let label = t;
 
-      let color = 'bg-slate-100 text-slate-655 dark:bg-slate-950 dark:text-slate-400 border border-slate-200/50 dark:border-slate-800';
+      let color = 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700';
 
-      if (t === 'series') { label = 'Séries'; color = 'bg-blue-500/10 border border-blue-500/20 text-blue-600 dark:text-blue-400'; }
+      if (t === 'series') { label = 'Séries'; color = 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20'; }
 
-      if (t === 'movies') { label = 'Filmes'; color = 'bg-indigo-500/10 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400'; }
+      if (t === 'movies') { label = 'Filmes'; color = 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20'; }
 
-      if (t === 'book') { label = 'Livros'; color = 'bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400'; }
+      if (t === 'book') { label = 'Livros'; color = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20'; }
 
-      if (t === 'music') { label = 'Músicas'; color = 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400'; }
+      if (t === 'music') { label = 'Músicas'; color = 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'; }
+
+      if (t === 'other') { label = 'Outros'; color = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border border-slate-500/20'; }
 
       
 
-      return `<span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full ${color}">${label}</span>`;
+      return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-md ${color} inline-flex items-center gap-1">${label}</span>`;
 
     }).join(' ');
 
 
 
     const statusBadge = source.isActive
-      ? `<span class="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 whitespace-nowrap"><i class="ph-fill ph-circle text-[6px] mr-1"></i>Ativo</span>`
-      : `<span class="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-500/10 text-slate-500 border border-slate-500/20 whitespace-nowrap"><i class="ph-fill ph-circle text-[6px] mr-1 text-slate-400"></i>Inativo</span>`;
+      ? `<span class="inline-flex items-center px-2.5 py-1 text-[10px] font-bold rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 whitespace-nowrap"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span>Ativo</span>`
+      : `<span class="inline-flex items-center px-2.5 py-1 text-[10px] font-bold rounded-full bg-slate-500/10 text-slate-500 dark:text-slate-400 border border-slate-500/20 whitespace-nowrap"><span class="w-1.5 h-1.5 rounded-full bg-slate-400 mr-1.5"></span>Inativo</span>`;
 
-
+    const cleanUrl = (source.url || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
 
     return `
 
-      <tr class="border-b border-slate-200 dark:border-slate-800/80 hover:bg-slate-50/50 dark:hover:bg-slate-900/40 text-xs">
+      <tr class="hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors text-xs group">
 
-        <td class="py-4 px-6 font-bold text-slate-700 dark:text-slate-300">
+        <td class="py-3.5 px-6 align-middle">
 
-          ${source.name}
+          <div class="flex items-center gap-3">
 
-          <p class="text-[10px] font-normal text-slate-400 mt-0.5 truncate max-w-xs" title="${source.description}">${source.description || 'Sem descrição.'}</p>
+            <div class="w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-xs flex items-center justify-center border border-slate-200/60 dark:border-slate-700/60 flex-shrink-0">
+
+              ${(source.name || 'S').charAt(0).toUpperCase()}
+
+            </div>
+
+            <div class="min-w-0">
+
+              <span class="font-bold text-slate-800 dark:text-slate-200 text-xs block truncate group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors">
+
+                ${source.name}
+
+              </span>
+
+              <p class="text-[11px] font-normal text-slate-400 dark:text-slate-500 mt-0.5 truncate max-w-xs" title="${source.description || ''}">
+
+                ${source.description || 'Sem descrição cadastrada.'}
+
+              </p>
+
+            </div>
+
+          </div>
 
         </td>
 
-        <td class="py-4 px-6 font-mono text-[10px] text-slate-400 max-w-[180px] truncate" title="${source.searchUrlPattern}">
+        <td class="py-3.5 px-6 align-middle font-mono text-[11px] text-slate-500 dark:text-slate-400 max-w-[180px] truncate" title="${source.searchUrlPattern || source.url}">
 
-          ${source.url}
+          <a href="${source.url}" target="_blank" class="hover:text-brand-600 dark:hover:text-brand-400 underline underline-offset-2 transition-colors flex items-center gap-1">
+
+            <span class="truncate">${cleanUrl || source.url}</span>
+
+            <i class="ph-bold ph-arrow-square-out text-[10px] opacity-0 group-hover:opacity-100 transition-opacity"></i>
+
+          </a>
 
         </td>
 
-        <td class="py-4 px-6">
+        <td class="py-3.5 px-6 align-middle">
 
-          <div class="flex flex-wrap gap-1">${typeBadges || '<span class="text-slate-500 text-[10px]">Nenhum</span>'}</div>
+          <div class="flex flex-wrap gap-1">${typeBadges || '<span class="text-slate-400 dark:text-slate-500 text-[10px]">Nenhum</span>'}</div>
 
         </td>
 
-        <td class="py-4 px-6">${statusBadge}</td>
+        <td class="py-3.5 px-6 align-middle">${statusBadge}</td>
 
-        <td class="py-4 px-6 text-right space-x-1.5">
+        <td class="py-3.5 px-6 align-middle text-right">
 
-          <button onclick="analyzeSource(${source.id})" class="p-1.5 btn-ai-analyze rounded-lg transition-colors" title="Otimizar Busca com IA">
-            <i class="ph-bold ph-sparkle text-sm"></i>
-          </button>
+          <div class="flex items-center justify-end gap-1.5">
 
-          <button onclick="toggleSourceActive(${source.id})" class="p-1.5 ${source.isActive ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400' : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'} rounded-lg transition-colors" title="${source.isActive ? 'Desativar Site' : 'Ativar Site'}">
-            <i class="ph-bold ${source.isActive ? 'ph-toggle-right' : 'ph-toggle-left'} text-sm"></i>
-          </button>
+            <button onclick="analyzeSource(${source.id})" class="p-1.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 rounded-xl transition-all shadow-xs" title="Otimizar Busca com IA">
 
-          <button onclick="editSource(${source.id})" class="p-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-600 dark:text-slate-300 rounded-lg transition-colors" title="Editar">
+              <i class="ph-bold ph-sparkle text-sm"></i>
 
-            <i class="ph-bold ph-pencil-simple text-sm"></i>
+            </button>
 
-          </button>
+            <button onclick="toggleSourceActive(${source.id})" class="p-1.5 ${source.isActive ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'} rounded-xl transition-all shadow-xs" title="${source.isActive ? 'Desativar Site' : 'Ativar Site'}">
 
-          <button onclick="deleteSource(${source.id})" class="p-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors" title="Excluir">
+              <i class="ph-bold ${source.isActive ? 'ph-toggle-right' : 'ph-toggle-left'} text-sm"></i>
 
-            <i class="ph-bold ph-trash text-sm"></i>
+            </button>
 
-          </button>
+            <button onclick="editSource(${source.id})" class="p-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200/60 dark:border-slate-700/60 rounded-xl transition-all shadow-xs" title="Editar">
+
+              <i class="ph-bold ph-pencil-simple text-sm"></i>
+
+            </button>
+
+            <button onclick="deleteSource(${source.id})" class="p-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 border border-red-500/20 rounded-xl transition-all shadow-xs" title="Excluir">
+
+              <i class="ph-bold ph-trash text-sm"></i>
+
+            </button>
+
+          </div>
 
         </td>
 
@@ -2649,7 +2770,7 @@ function appendResultCard(result) {
 
 ${delugeOnline ? `
 
-        <button onclick="sendToDeluge('${result.magnetLink}', this)" class="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors mr-1">
+        <button onclick="sendToDeluge('${result.magnetLink}', this, '${escapeHtml(result.size || '')}')" class="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors mr-1">
 
           <i class="ph-bold ph-download-simple text-sm"></i> Enviar p/ Deluge
 
@@ -3040,7 +3161,7 @@ function showDelugeToast(message, type = 'success') {
   }, 4000);
 }
 
-async function sendToDeluge(magnetLink, buttonEl) {
+async function sendToDeluge(magnetLink, buttonEl, size = '') {
 
   try {
 
@@ -3058,7 +3179,7 @@ async function sendToDeluge(magnetLink, buttonEl) {
 
       headers: { 'Content-Type': 'application/json' },
 
-      body: JSON.stringify({ magnetLink })
+      body: JSON.stringify({ magnetLink, size })
 
     });
 
@@ -3123,6 +3244,7 @@ async function downloadAllTorrentsInDeluge() {
   if (activeSearchData.results.length === 0) return;
 
   const magnets = activeSearchData.results.map(r => r.magnetLink);
+  const items = activeSearchData.results.map(r => ({ magnetLink: r.magnetLink, size: r.size }));
 
   
 
@@ -3142,7 +3264,7 @@ async function downloadAllTorrentsInDeluge() {
 
       headers: { 'Content-Type': 'application/json' },
 
-      body: JSON.stringify({ magnetLinks: magnets })
+      body: JSON.stringify({ magnetLinks: magnets, items })
 
     });
 

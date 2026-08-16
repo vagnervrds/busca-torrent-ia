@@ -30,7 +30,8 @@ async function getSettings() {
     aiUrl: settings.aiUrl || 'http://localhost:8045/v1',
     aiToken: settings.aiToken || process.env.AI_TOKEN || '',
     aiModel: settings.aiModel || 'gemini-3-flash',
-    preferredLanguage: settings.preferredLanguage || 'Português',
+    preferredAudioLanguage: settings.preferredAudioLanguage || 'Português (Dublado)',
+    preferredSubtitleLanguage: settings.preferredSubtitleLanguage || 'Português (PT-BR)',
     preferredResolution: settings.preferredResolution || '1080p'
   };
 }
@@ -697,7 +698,7 @@ async function runSearchAgent(searchId, resumeMode = true) {
     
     const config = await getSettings();
     await logAgent(searchId, `Iniciando agente de IA para busca: "${search.query}"`, 'info');
-    await logAgent(searchId, `Idioma preferencial: ${config.preferredLanguage} | Resolução: ${config.preferredResolution}`, 'info');
+    await logAgent(searchId, `Áudio preferencial: ${config.preferredAudioLanguage} | Legenda: ${config.preferredSubtitleLanguage} | Resolução: ${config.preferredResolution}`, 'info');
     
     // Se não for modo de retomada, limpa resultados de avaliações antigas para reavaliar, mas preserva os torrents encontrados
     if (!resumeMode) {
@@ -1085,16 +1086,20 @@ async function runSearchAgent(searchId, resumeMode = true) {
             
             const titlesList = batch.map((t, idx) => ({ index: idx, title: t.title, seeders: t.seeders, size: t.size, source: t.sourceName }));
             
-            const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
+            const isSomenteDublado = config.preferredAudioLanguage && (config.preferredAudioLanguage.toLowerCase().includes('dublado') || config.preferredAudioLanguage.toLowerCase().includes('português') || config.preferredAudioLanguage.toLowerCase().includes('pt'));
             const filterPrompt = [
               {
                 role: "system",
-                content: `Você é um classificador de relevância de arquivos de torrent.${isSomenteDublado ? ' ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"): O usuário quer apenas conteúdo com áudio em Português. Selecione preferencialmente torrents que pareçam conter áudio em português (ex: contendo "dublado", "dual audio", "PT-BR" no título). Na dúvida se o áudio correto está presente, selecione o índice para que possamos inspecioná-lo de forma profunda (analisando os arquivos e descrição internos).' : ''}`
+                content: `Você é um classificador de relevância de arquivos de torrent.
+REQUISITOS DE ÁUDIO E LEGENDA DO USUÁRIO:
+- Áudio desejado: "${config.preferredAudioLanguage}"
+- Legendas desejadas: "${config.preferredSubtitleLanguage}"
+${isSomenteDublado ? 'ATENÇÃO REQUISITO DE ÁUDIO ("Dublado / Português"): O usuário quer apenas conteúdo com áudio em Português. Selecione preferencialmente torrents que pareçam conter áudio em português (ex: contendo "dublado", "dual audio", "PT-BR" no título). Na dúvida se o áudio correto está presente, selecione o índice para que possamos inspecioná-lo de forma profunda (analisando os arquivos e descrição internos).' : ''}`
               },
               {
                 role: "user",
                 content: `O usuário busca: "${search.query}".
-                Preferências: Resolução: ${config.preferredResolution} | Idioma: ${config.preferredLanguage}.
+                Preferências: Resolução: ${config.preferredResolution} | Áudio: ${config.preferredAudioLanguage} | Legendas: ${config.preferredSubtitleLanguage}.
                 
                 Aqui está uma lista de torrents encontrados (com seus índices):
                 ${JSON.stringify(titlesList, null, 2)}
@@ -1227,15 +1232,16 @@ async function runSearchAgent(searchId, resumeMode = true) {
                 continue;
               }
               
-              await logAgent(searchId, `Encontrado(s) ${magnetsToEvaluate.length} link(s) magnet na página de "${candidate.title}". Enviando para avaliação da IA...`, 'info');
-              
-              const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
+              const isSomenteDublado = config.preferredAudioLanguage && (config.preferredAudioLanguage.toLowerCase().includes('dublado') || config.preferredAudioLanguage.toLowerCase().includes('português') || config.preferredAudioLanguage.toLowerCase().includes('pt'));
               const evaluationPrompt = [
                 {
                   role: "system",
                   content: `Você é um avaliador inteligente de torrents. Você deve analisar uma página de detalhes de torrent e seus múltiplos links magnet para classificar e selecionar quais links individuais correspondem à busca e preferências do usuário.
+PREFERÊNCIAS DE ÁUDIO E LEGENDA DO USUÁRIO:
+- Idioma do Áudio: "${config.preferredAudioLanguage}"
+- Idioma das Legendas: "${config.preferredSubtitleLanguage}"
 ${isSomenteDublado ? `
-ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
+ATENÇÃO REQUISITO DE ÁUDIO ("Dublado / Português"):
 - O usuário especificou que deseja apenas conteúdo DUBLADO (áudio em Português-BR).
 - Você deve ter certeza de que o áudio do vídeo está em Português. NÃO aceite o termo genérico "Dual Áudio" ou "Dual-Audio" isoladamente no título ou descrição como prova de áudio em português, pois ele pode se referir a outras línguas (ex: Inglês e Japonês). Procure por indícios explícitos de áudio em português (como "dublado", "PT-BR", "Português", "pob", "pt-br", arquivos contendo "por", "pt", "dub", "portuguese" no nome ou nas especificações de áudio na descrição).
 - Se houver dúvida se o áudio em português está realmente presente (ex: diz "Dual Áudio" ou "Multi-áudio" sem listar os idiomas específicos, mas há uma chance razoável por ser de tracker/grupo brasileiro), adicione o torrent à lista de correspondências (matches = true), mas marque "hasPortugueseAudio" como false no JSON para sinalizar que o áudio em português não está garantido. Isso permitirá que o sistema adicione o torrent na lista mas continue procurando por versões com o áudio correto 100% confirmado.` : ''}`
@@ -1243,7 +1249,8 @@ ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
                 {
                   role: "user",
                   content: `Busca do Usuário: "${search.query}"
-                  Idioma Preferido: "${config.preferredLanguage}"
+                  Áudio Preferido: "${config.preferredAudioLanguage}"
+                  Legenda Preferida: "${config.preferredSubtitleLanguage}"
                   Resolução Recomendada: "${config.preferredResolution}"
                   
                   Título do Torrent Candidato: "${candidate.title}"
@@ -1390,7 +1397,7 @@ ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
             }
           }
         } else {
-          const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
+          const isSomenteDublado = config.preferredAudioLanguage && (config.preferredAudioLanguage.toLowerCase().includes('dublado') || config.preferredAudioLanguage.toLowerCase().includes('português') || config.preferredAudioLanguage.toLowerCase().includes('pt'));
           const variationPrompt = [
             {
               role: "system",
@@ -1399,7 +1406,8 @@ ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
             {
               role: "user",
               content: `O usuário quer encontrar torrents que correspondam a: "${search.query}".
-              Idioma Preferido: "${config.preferredLanguage}"
+              Áudio Preferido: "${config.preferredAudioLanguage}"
+              Legendas Preferidas: "${config.preferredSubtitleLanguage}"
               Resolução Preferida: "${config.preferredResolution}"
               ${isSomenteDublado ? `
               ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
@@ -1522,20 +1530,24 @@ async function checkSearchCompletion(searchId, searchModel, browserInstance, con
     hasPortugueseSubtitles: r.hasPortugueseSubtitles
   }));
   
-  const isSomenteDublado = config.preferredLanguage && config.preferredLanguage.toLowerCase().includes('dublado');
+  const isSomenteDublado = config.preferredAudioLanguage && (config.preferredAudioLanguage.toLowerCase().includes('dublado') || config.preferredAudioLanguage.toLowerCase().includes('português') || config.preferredAudioLanguage.toLowerCase().includes('pt'));
   const completionPrompt = [
     {
       role: "system",
       content: `Você é um gerente de qualidade de busca e torrents. Analise se os resultados obtidos até agora satisfazem o termo de pesquisa original do usuário.
+PREFERÊNCIAS DE ÁUDIO E LEGENDA DO USUÁRIO:
+- Áudio: "${config.preferredAudioLanguage || 'Indiferente'}"
+- Legendas: "${config.preferredSubtitleLanguage || 'Indiferente'}"
 ${isSomenteDublado ? `
-ATENÇÃO REQUISITO DE IDIOMA ("somente dublado"):
+ATENÇÃO REQUISITO DE ÁUDIO ("Dublado / Português"):
 - O objetivo principal é obter arquivos com áudio em Português (hasPortugueseAudio = true).
 - Se todos os resultados encontrados até o momento tiverem hasPortugueseAudio = false (apenas legendados ou em outro idioma), a busca NÃO deve ser marcada como completada (completed = false), para que a busca em background continue tentando outras variações, a menos que tenhamos exaurido totalmente as tentativas.` : ''}`
     },
     {
       role: "user",
       content: `Consulta do Usuário: "${searchModel.query}"
-      Idioma Preferido: "${config.preferredLanguage}"
+      Áudio Preferido: "${config.preferredAudioLanguage || 'Indiferente'}"
+      Legenda Preferida: "${config.preferredSubtitleLanguage || 'Indiferente'}"
       Resolução Preferida: "${config.preferredResolution}"
       
       Resultados Correspondentes Encontrados até agora:

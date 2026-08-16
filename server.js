@@ -190,6 +190,14 @@ app.get('/api/settings', async (req, res) => {
     settings.forEach(s => {
       config[s.key] = s.value;
     });
+
+    if (!config.deluge_download_path) {
+      const discoveredPath = await discoverDelugePath();
+      if (discoveredPath) {
+        config.deluge_download_path = discoveredPath;
+      }
+    }
+
     res.json(config);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -918,11 +926,16 @@ app.get('/api/deluge/stream', async (req, res) => {
 
 // Adiciona um torrent via magnet link individual
 app.post('/api/deluge/add', async (req, res) => {
-  const { magnetLink } = req.body;
+  const { magnetLink, size } = req.body;
   if (!magnetLink) {
     return res.status(400).json({ error: 'Magnet link é obrigatório.' });
   }
   try {
+    const spaceCheck = await ensureDiskSpaceForTorrent(size || magnetLink);
+    if (!spaceCheck.success) {
+      return res.status(400).json({ success: false, error: spaceCheck.error });
+    }
+
     const client = await getDelugeClient();
     const torrentId = await client.addMagnet(magnetLink);
     await invalidateCache('deluge_torrents');
@@ -939,15 +952,22 @@ app.post('/api/deluge/add', async (req, res) => {
 
 // Adiciona múltiplos torrents simultaneamente
 app.post('/api/deluge/add-multiple', async (req, res) => {
-  const { magnetLinks } = req.body;
+  const { magnetLinks, items, sizes } = req.body;
   if (!magnetLinks || !Array.isArray(magnetLinks)) {
     return res.status(400).json({ error: 'Lista de magnet links é obrigatória.' });
   }
   try {
     const client = await getDelugeClient();
     const results = [];
-    for (const magnet of magnetLinks) {
+    for (let i = 0; i < magnetLinks.length; i++) {
+      const magnet = magnetLinks[i];
+      const itemSize = (items && items[i] && items[i].size) || (sizes && sizes[i]) || magnet;
       try {
+        const spaceCheck = await ensureDiskSpaceForTorrent(itemSize);
+        if (!spaceCheck.success) {
+          results.push({ magnetLink: magnet, success: false, error: spaceCheck.error });
+          continue;
+        }
         const torrentId = await client.addMagnet(magnet);
         results.push({ magnetLink: magnet, success: true, torrentId });
       } catch (err) {
@@ -1229,6 +1249,11 @@ app.post('/api/deluge/add-url', async (req, res) => {
 
     for (const [mag, title] of magnetsFoundMap.entries()) {
       try {
+        const spaceCheck = await ensureDiskSpaceForTorrent(mag);
+        if (!spaceCheck.success) {
+          results.push({ title, magnet: mag, success: false, error: spaceCheck.error });
+          continue;
+        }
         const torrentId = await client.addMagnet(mag);
         results.push({ title, magnet: mag, success: true, torrentId, alreadyExists: false });
       } catch (addErr) {
@@ -1424,6 +1449,8 @@ app.post('/api/monitored-pages/:id/check', async (req, res) => {
     if (client && magnetsFoundMap.size > 0) {
       for (const [mag] of magnetsFoundMap.entries()) {
         try {
+          const spaceCheck = await ensureDiskSpaceForTorrent(mag);
+          if (!spaceCheck.success) continue;
           await client.addMagnet(mag);
           addedCount++;
         } catch (addErr) {
@@ -1668,6 +1695,190 @@ async function getDiskSpace(dirPath) {
   return null;
 }
 
+function formatBytes(bytes, decimals = 2) {
+  if (!bytes || bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
+function parseSizeBytes(sizeInput) {
+  if (!sizeInput) return 0;
+  if (typeof sizeInput === 'number') return sizeInput;
+
+  const str = String(sizeInput).trim();
+
+  // Se for um magnet link com parâmetro xl=
+  const xlMatch = str.match(/[?&]xl=(\d+)/i);
+  if (xlMatch) {
+    return parseInt(xlMatch[1], 10);
+  }
+
+  // Se for apenas dígitos
+  if (/^\d+$/.test(str)) {
+    return parseInt(str, 10);
+  }
+
+  // Converte string formatada como "1.5 GB", "700.5 MB", "4.2 GiB", "850 KB"
+  const match = str.match(/^([\d.,]+)\s*([a-zA-Z]+)?$/);
+  if (match) {
+    const numStr = match[1].replace(',', '.');
+    const num = parseFloat(numStr);
+    if (isNaN(num)) return 0;
+    
+    const unit = (match[2] || 'B').toUpperCase();
+    if (unit.startsWith('TB') || unit.startsWith('TIB')) return Math.round(num * 1024 * 1024 * 1024 * 1024);
+    if (unit.startsWith('GB') || unit.startsWith('GIB')) return Math.round(num * 1024 * 1024 * 1024);
+    if (unit.startsWith('MB') || unit.startsWith('MIB')) return Math.round(num * 1024 * 1024);
+    if (unit.startsWith('KB') || unit.startsWith('KIB')) return Math.round(num * 1024);
+    if (unit.startsWith('B')) return Math.round(num);
+  }
+
+  return 0;
+}
+
+async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
+  const size = parseSizeBytes(torrentSizeInBytes);
+  if (!size || size <= 0) {
+    return { success: true, freed: 0 };
+  }
+
+  // Consulta limite mínimo de espaço livre em disco a ser mantido na unidade (padrão 4GB)
+  const minSetting = await SystemSetting.findOne({ where: { key: 'minFreeSpaceGB' } });
+  const minFreeGB = minSetting ? (parseFloat(minSetting.value) || 4) : 4;
+  const minFreeBytes = Math.round(minFreeGB * 1024 * 1024 * 1024);
+
+  // Tamanho necessário = (tamanho do torrent + 10%) + espaço mínimo livre reservado no disco
+  const requiredSpace = Math.ceil(size * 1.10) + minFreeBytes;
+
+  const downloadPath = await discoverDelugePath();
+  if (!downloadPath || !fs.existsSync(downloadPath)) {
+    return { success: true, freed: 0 };
+  }
+
+  let diskSpace = await getDiskSpace(downloadPath);
+  if (!diskSpace || typeof diskSpace.free !== 'number') {
+    try {
+      if (typeof fs.statfsSync === 'function') {
+        const stats = fs.statfsSync(downloadPath);
+        const free = Number(stats.bavail || stats.bfree) * Number(stats.bsize);
+        diskSpace = { free };
+      }
+    } catch (e) {}
+  }
+
+  if (!diskSpace || typeof diskSpace.free !== 'number') {
+    return { success: true, freed: 0 };
+  }
+
+  if (diskSpace.free >= requiredSpace) {
+    return { success: true, freed: 0 };
+  }
+
+  const setting = await SystemSetting.findOne({ where: { key: 'autoDeleteOldFiles' } });
+  const autoDeleteEnabled = setting ? (setting.value === 'true' || setting.value === '1') : true;
+
+  if (!autoDeleteEnabled) {
+    return {
+      success: false,
+      error: `Espaço em disco insuficiente. Necessário: ${formatBytes(requiredSpace)} (${formatBytes(size)} + 10% + ${minFreeGB} GB livres a manter), Disponível: ${formatBytes(diskSpace.free)}. A exclusão automática de arquivos antigos está desativada nas configurações.`
+    };
+  }
+
+  console.log(`[Storage] Espaço insuficiente (${formatBytes(diskSpace.free)} livre / ${formatBytes(requiredSpace)} necessário incluindo reserva de ${minFreeGB} GB). Iniciando remoção automática dos arquivos mais antigos...`);
+
+  function getItemStats(dir) {
+    const items = [];
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        try {
+          const stat = fs.statSync(fullPath);
+          let itemSize = stat.size;
+          let mtimeMs = stat.mtimeMs;
+
+          if (entry.isDirectory()) {
+            itemSize = getFolderSize(fullPath);
+          }
+
+          items.push({
+            path: fullPath,
+            name: entry.name,
+            isDirectory: entry.isDirectory(),
+            mtimeMs: mtimeMs,
+            size: itemSize
+          });
+        } catch (stErr) {}
+      }
+    } catch (rdErr) {
+      console.error(`[Storage] Erro ao ler diretório de downloads (${dir}):`, rdErr.message);
+    }
+    return items;
+  }
+
+  function getFolderSize(dir) {
+    let folderSize = 0;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        try {
+          if (entry.isDirectory()) {
+            folderSize += getFolderSize(fullPath);
+          } else {
+            const stat = fs.statSync(fullPath);
+            folderSize += stat.size;
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    return folderSize;
+  }
+
+  let items = getItemStats(downloadPath);
+  items.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+  let freedBytes = 0;
+  let currentFree = diskSpace.free;
+
+  for (const item of items) {
+    if (currentFree >= requiredSpace) {
+      break;
+    }
+
+    try {
+      console.log(`[Storage] Apagando item antigo: ${item.name} (${formatBytes(item.size)}, modificado em ${new Date(item.mtimeMs).toISOString()})`);
+      fs.rmSync(item.path, { recursive: true, force: true });
+      freedBytes += item.size;
+      currentFree += item.size;
+
+      const updatedDisk = await getDiskSpace(downloadPath);
+      if (updatedDisk && typeof updatedDisk.free === 'number') {
+        currentFree = updatedDisk.free;
+      }
+    } catch (rmErr) {
+      console.error(`[Storage] Erro ao apagar ${item.path}:`, rmErr.message);
+    }
+  }
+
+  if (freedBytes > 0) {
+    await invalidateCache('storage_tree');
+  }
+
+  if (currentFree < requiredSpace) {
+    return {
+      success: false,
+      error: `Espaço em disco insuficiente mesmo após apagar arquivos antigos. Necessário: ${formatBytes(requiredSpace)}, Disponível após limpeza: ${formatBytes(currentFree)}.`
+    };
+  }
+
+  console.log(`[Storage] Espaço liberado com sucesso! Espaço livre atual: ${formatBytes(currentFree)} (Necessário: ${formatBytes(requiredSpace)})`);
+  return { success: true, freed: freedBytes };
+}
+
 app.get('/api/storage/tree', async (req, res) => {
   try {
     const setting = await SystemSetting.findOne({ where: { key: 'deluge_download_path' } });
@@ -1871,6 +2082,8 @@ async function checkMonitoredPagesTask() {
         if (client && magnetsFoundMap.size > 0) {
           for (const [mag] of magnetsFoundMap.entries()) {
             try {
+              const spaceCheck = await ensureDiskSpaceForTorrent(mag);
+              if (!spaceCheck.success) continue;
               await client.addMagnet(mag);
               pageAddedCount++;
               addedTotal++;
