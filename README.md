@@ -12,6 +12,12 @@ Ele foi projetado para rodar em servidores (como DietPi, Raspberry Pi, VPS ou lo
 - **Avaliação Inteligente com IA:** Integra-se com modelos de IA (OpenAI, Gemini, etc.) para analisar os resultados extraídos e escolher a melhor opção com base nas suas preferências (ex: resolução 1080p, 4K, etc).
 - **Filtro Avançado "Somente Dublado":** Suporte aprimorado para áudio em Português-BR. Quando configurado como "somente dublado", o classificador prioriza títulos em português, o avaliador da IA realiza checagem rigorosa de áudio PT-BR (desconsiderando rótulos genéricos de "Dual Áudio" sem comprovação de idioma) e o gerente de qualidade mantém a busca ativa até que um arquivo com áudio dublado seja confirmado.
 - **Integração Direta com o Deluge:** Detecta automaticamente as credenciais do Deluge rodando localmente (ou via configuração) e adiciona os torrents aprovados diretamente para a fila de download, invalidando caches relacionados para atualização imediata.
+- **Monitoramento Automático de Páginas (URLs):** Permite cadastrar URLs de páginas de torrents (ex: lançamentos de filmes ou séries) para acompanhamento contínuo:
+  - **Verificação Periódica a cada 12h & Startup:** Checa automaticamente as URLs ao iniciar o servidor e repetidamente a cada 12 horas.
+  - **Extração Completa de Magnet Links & Títulos:** Captura todos os torrents encontrados na página (via Fetch HTTP com fallback para Puppeteer Stealth caso haja protetores de link ou JS).
+  - **Captura de Imagem Destaque (Capa):** Identifica e salva a imagem do poster (Open Graph / Twitter Card / Post Cover), exibindo miniaturas na lista de URLs.
+  - **Prevenção de Duplicadas & Fila Sequencial:** Normaliza as URLs para evitar duplicadas e realiza checagens sequenciais com pausa de 3s para evitar bloqueios.
+  - **Priorização por Novos Torrents:** Ordena a lista e a fila de checagem pela data da última adição de novos torrents (`lastContentChangedAt`).
 - **Interface Web em Tempo Real (SSE Global):** Acompanhe o progresso do agente, status das buscas e logs de decisão da IA ao vivo. Conta com um canal SSE global que sincroniza o histórico, badges e contadores da barra lateral instantaneamente para todos os clientes conectados.
 - **Gerenciador de Armazenamento Redesenhado:** Página administrativa redesenhada com Tailwind CSS sob uma estética moderna e limpa, oferecendo:
   - **Navegador de Arquivos:** Tabela interativa para navegar pelas pastas de downloads do Deluge com suporte a breadcrumbs dinâmicos (compatível com Linux e Windows).
