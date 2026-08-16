@@ -113,13 +113,17 @@
     }
 
     ::-webkit-scrollbar-thumb {
-
       background: #cbd5e1;
-
       border-radius: 3px;
-
     }
 
+    @keyframes scaleIn {
+      0% { transform: scale(0.95); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .animate-scaleIn {
+      animation: scaleIn 0.2s ease-out forwards;
+    }
   </style>
 
 </head>
@@ -685,6 +689,11 @@
               <i class="ph-bold ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500 text-xs"></i>
               <input type="text" id="searchDelugeInput" placeholder="Buscar torrent..." class="w-full pl-8 pr-3 py-2.5 bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 rounded-xl text-xs focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 transition-all" />
             </div>
+
+            <!-- Botão Adicionar Magnet / URL -->
+            <button id="openAddDelugeUrlBtn" class="py-2.5 px-4 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all" title="Adicionar torrent por Magnet Link ou URL de página web">
+              <i class="ph-bold ph-plus-circle text-sm"></i> Adicionar URL
+            </button>
 
             <!-- Botão Limpar Erros -->
             <button id="clearDelugeErrorsBtn" class="py-2.5 px-4 bg-red-500/10 hover:bg-red-500/20 text-red-650 dark:text-red-400 border border-red-500/20 hover:border-red-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all" title="Remover todos os torrents com erro (incluindo arquivos)">
@@ -1327,6 +1336,88 @@
 
 
 
+  <!-- MODAL PARA ADICIONAR TORRENT VIA MAGNET OU URL DE PÁGINA -->
+
+  <div id="delugeAddUrlModal" class="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center hidden p-4 font-sans">
+
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-scaleIn">
+
+      <!-- Header -->
+
+      <div class="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/30 dark:bg-slate-950/25">
+
+        <h3 class="font-bold text-sm text-slate-850 dark:text-slate-100 flex items-center gap-2">
+
+          <i class="ph-bold ph-link-simple text-emerald-500 text-base"></i> Adicionar Torrent no Deluge
+
+        </h3>
+
+        <button id="closeDelugeAddUrlModalBtn" type="button" class="text-slate-400 hover:text-slate-200 text-lg transition-colors">
+
+          <i class="ph-bold ph-x"></i>
+
+        </button>
+
+      </div>
+
+
+
+      <!-- Body -->
+
+      <form id="delugeAddUrlForm" class="p-6 space-y-4">
+
+        <div class="space-y-2">
+
+          <label for="delugeUrlInput" class="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+
+            Magnet Link ou URL da Página Web
+
+          </label>
+
+          <p class="text-[11px] text-slate-400 dark:text-slate-500 leading-normal">
+
+            Cole abaixo um <b>Magnet Link</b> direto (ex: <code class="text-emerald-500 dark:text-emerald-400">magnet:?xt=...</code>) ou a <b>URL de uma página web</b> contendo links torrents.
+
+          </p>
+
+          <textarea id="delugeUrlInput" rows="4" placeholder="magnet:?xt=urn:btih:... ou https://exemplo.com/filme-torrent" class="w-full py-2.5 px-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono resize-none transition-all" required></textarea>
+
+        </div>
+
+
+
+        <!-- Feedback Status Message inside Modal -->
+
+        <div id="delugeAddUrlStatus" class="hidden text-xs p-3 rounded-xl flex items-center gap-2 font-medium"></div>
+
+
+
+        <!-- Footer Buttons -->
+
+        <div class="flex items-center justify-end gap-2 pt-2">
+
+          <button id="cancelDelugeAddUrlBtn" type="button" class="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs transition-all">
+
+            Cancelar
+
+          </button>
+
+          <button id="submitDelugeAddUrlBtn" type="submit" class="py-2.5 px-5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-md shadow-emerald-500/10 hover:shadow-lg transition-all flex items-center gap-2">
+
+            <i class="ph-bold ph-download-simple"></i> Adicionar ao Deluge
+
+          </button>
+
+        </div>
+
+      </form>
+
+    </div>
+
+  </div>
+
+
+
   <!-- MODAL DE ANÁLISE DE SITE COM IA -->
   <div id="sourceAnalysisModal" class="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center hidden p-4 font-sans">
     <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-lg rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-scaleIn">
@@ -1475,6 +1566,36 @@
         <button type="button" id="closeBatchBtn" class="py-2 px-4 bg-slate-100 hover:bg-slate-202 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-705 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors">
           Fechar
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE DIÁLOGO CUSTOMIZADO (ALERT/CONFIRM) -->
+  <div id="customDialogModal" class="fixed inset-0 z-[100] bg-slate-950/60 backdrop-blur-sm flex items-center justify-center hidden p-4 transition-opacity duration-200">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-scaleIn transform scale-95 transition-all duration-300">
+      <!-- Cabeçalho -->
+      <div class="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/30 dark:bg-slate-950/25">
+        <h3 id="customDialogTitle" class="font-bold text-sm text-slate-850 dark:text-slate-100 flex items-center gap-2">
+          <!-- Ícone e Título dinâmicos -->
+        </h3>
+        <button id="customDialogCloseBtn" class="text-slate-400 hover:text-slate-650 dark:hover:text-slate-200 text-lg transition-colors focus:outline-none">
+          <i class="ph-bold ph-x"></i>
+        </button>
+      </div>
+      <!-- Corpo -->
+      <div class="p-6 space-y-6">
+        <p id="customDialogMessage" class="text-xs md:text-sm text-slate-600 dark:text-slate-400 leading-relaxed font-medium">
+          <!-- Mensagem dinâmica -->
+        </p>
+        <!-- Ações (Botões) -->
+        <div class="flex items-center justify-end gap-3 pt-2">
+          <button id="customDialogCancelBtn" type="button" class="py-2 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors focus:outline-none min-w-[80px]">
+            Cancelar
+          </button>
+          <button id="customDialogConfirmBtn" type="button" class="py-2 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs shadow-md shadow-brand-500/10 hover:shadow-lg transition-all focus:outline-none min-w-[80px]">
+            Confirmar
+          </button>
+        </div>
       </div>
     </div>
   </div>

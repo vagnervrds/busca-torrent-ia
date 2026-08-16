@@ -8,6 +8,77 @@ function formatSize(bytes) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Sobrescreve alert e confirm globais para usar o Modal Customizado com foco inicial
+  function setupCustomDialogs() {
+    const modal = document.getElementById('customDialogModal');
+    const titleEl = document.getElementById('customDialogTitle');
+    const messageEl = document.getElementById('customDialogMessage');
+    const confirmBtn = document.getElementById('customDialogConfirmBtn');
+    const cancelBtn = document.getElementById('customDialogCancelBtn');
+    const closeBtn = document.getElementById('customDialogCloseBtn');
+
+    let activeResolve = null;
+
+    function showDialog(type, message, customTitle) {
+      return new Promise((resolve) => {
+        activeResolve = resolve;
+        messageEl.innerText = message;
+
+        if (type === 'confirm') {
+          titleEl.innerHTML = '<i class="ph-bold ph-question text-brand-500 text-lg"></i> <span>' + (customTitle || 'Confirmação') + '</span>';
+          cancelBtn.classList.remove('hidden');
+          confirmBtn.innerText = 'Confirmar';
+          confirmBtn.className = "py-2 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs shadow-md shadow-brand-500/10 hover:shadow-lg transition-all focus:outline-none min-w-[80px]";
+        } else {
+          titleEl.innerHTML = '<i class="ph-bold ph-info text-blue-500 text-lg"></i> <span>' + (customTitle || 'Aviso') + '</span>';
+          cancelBtn.classList.add('hidden');
+          confirmBtn.innerText = 'OK';
+          confirmBtn.className = "py-2 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs shadow-md shadow-brand-500/10 hover:shadow-lg transition-all focus:outline-none min-w-[80px]";
+        }
+
+        modal.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+
+        setTimeout(() => {
+          confirmBtn.focus();
+        }, 50);
+      });
+    }
+
+    function closeDialog(value) {
+      modal.classList.add('hidden');
+      document.body.style.overflow = '';
+      if (activeResolve) {
+        activeResolve(value);
+        activeResolve = null;
+      }
+    }
+
+    confirmBtn.onclick = () => closeDialog(true);
+    cancelBtn.onclick = () => closeDialog(false);
+    closeBtn.onclick = () => closeDialog(false);
+
+    modal.onclick = (e) => {
+      if (e.target === modal) {
+        closeDialog(false);
+      }
+    };
+
+    window.addEventListener('keydown', (e) => {
+      if (!modal.classList.contains('hidden')) {
+        if (e.key === 'Escape') {
+          closeDialog(false);
+          e.preventDefault();
+        }
+      }
+    });
+
+    window.alert = (message, title) => showDialog('alert', message, title);
+    window.confirm = (message, title) => showDialog('confirm', message, title);
+  }
+
+  setupCustomDialogs();
+
   let myChart = null;
   let selectedItem = null;
   let activeView = 'manager'; // 'manager' or 'blocks'
@@ -455,7 +526,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       loadingOverlay.classList.add('hidden');
     } catch (err) {
-      alert('Falha ao carregar armazenamento: ' + err.message);
+      await alert('Falha ao carregar armazenamento: ' + err.message);
       loadingOverlay.classList.add('hidden');
     }
   }
@@ -563,12 +634,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (result.success) {
         await loadTree();
       } else {
-        alert('Erro ao descobrir caminho: ' + result.error);
+        await alert('Erro ao descobrir caminho: ' + result.error);
         loadingOverlay.classList.add('hidden');
         errorOverlay.classList.remove('hidden');
       }
     } catch (err) {
-      alert('Falha na comunicação com servidor: ' + err.message);
+      await alert('Falha na comunicação com servidor: ' + err.message);
       loadingOverlay.classList.add('hidden');
       errorOverlay.classList.remove('hidden');
     }
@@ -641,11 +712,11 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         await loadTree();
       } else {
-        alert('Erro ao apagar: ' + (result.error || 'Erro desconhecido'));
+        await alert('Erro ao apagar: ' + (result.error || 'Erro desconhecido'));
         loadingOverlay.classList.add('hidden');
       }
     } catch (err) {
-      alert('Falha ao comunicar com servidor: ' + err.message);
+      await alert('Falha ao comunicar com servidor: ' + err.message);
       loadingOverlay.classList.add('hidden');
     }
   }

@@ -966,6 +966,102 @@ app.post('/api/deluge/add-multiple', async (req, res) => {
   }
 });
 
+// Adiciona torrents via Magnet Link direto ou extraindo Magnet Links de uma URL de página web
+app.post('/api/deluge/add-url', async (req, res) => {
+  const { url } = req.body;
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return res.status(400).json({ success: false, error: 'Magnet Link ou URL é obrigatório.' });
+  }
+
+  const inputStr = url.trim();
+
+  try {
+    const magnetsFound = new Set();
+    const magnetRegex = /magnet:\?xt=urn:[^\s"'<>]+/gi;
+
+    // 1. Procura por Magnet Links diretos no texto informado
+    const matchesInInput = inputStr.match(magnetRegex);
+    if (matchesInInput && matchesInInput.length > 0) {
+      matchesInInput.forEach(m => magnetsFound.add(m));
+    }
+
+    // 2. Se for uma URL (http:// ou https://), tenta buscar o conteúdo HTML da página
+    if (inputStr.startsWith('http://') || inputStr.startsWith('https://')) {
+      try {
+        const response = await fetch(inputStr, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          },
+          redirect: 'follow'
+        });
+
+        if (response.ok) {
+          const html = await response.text();
+          const pageMatches = html.match(magnetRegex);
+          if (pageMatches && pageMatches.length > 0) {
+            pageMatches.forEach(m => {
+              const cleanMagnet = m.replace(/&amp;/g, '&');
+              magnetsFound.add(cleanMagnet);
+            });
+          }
+        }
+      } catch (fetchErr) {
+        console.error('Erro ao acessar a URL para extrair magnet links:', fetchErr.message);
+        if (magnetsFound.size === 0) {
+          return res.status(400).json({
+            success: false,
+            error: `Não foi possível acessar a URL informada: ${fetchErr.message}`
+          });
+        }
+      }
+    }
+
+    if (magnetsFound.size === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Nenhum Magnet Link válido foi encontrado no texto ou na página da URL fornecida.'
+      });
+    }
+
+    const magnetList = Array.from(magnetsFound);
+    const client = await getDelugeClient();
+    const results = [];
+
+    for (const mag of magnetList) {
+      try {
+        const torrentId = await client.addMagnet(mag);
+        results.push({ magnet: mag, success: true, torrentId });
+      } catch (addErr) {
+        if (addErr.message && addErr.message.includes('already in session')) {
+          results.push({ magnet: mag, success: true, alreadyExists: true });
+        } else {
+          results.push({ magnet: mag, success: false, error: addErr.message });
+        }
+      }
+    }
+
+    await invalidateCache('deluge_torrents');
+
+    const addedCount = results.filter(r => r.success && !r.alreadyExists).length;
+    const existingCount = results.filter(r => r.alreadyExists).length;
+    const failedCount = results.filter(r => !r.success).length;
+
+    return res.json({
+      success: true,
+      totalFound: magnetList.length,
+      addedCount,
+      existingCount,
+      failedCount,
+      results
+    });
+  } catch (err) {
+    console.error('Erro em /api/deluge/add-url:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 // Pausa um torrent específico
 app.post('/api/deluge/torrents/:id/pause', async (req, res) => {
   const { id } = req.params;

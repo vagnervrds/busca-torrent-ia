@@ -221,6 +221,15 @@ const delugeSection = document.getElementById('delugeSection');
 const refreshDelugeBtn = document.getElementById('refreshDelugeBtn');
 const searchDelugeInput = document.getElementById('searchDelugeInput');
 const clearDelugeErrorsBtn = document.getElementById('clearDelugeErrorsBtn');
+const openAddDelugeUrlBtn = document.getElementById('openAddDelugeUrlBtn');
+
+const delugeAddUrlModal = document.getElementById('delugeAddUrlModal');
+const closeDelugeAddUrlModalBtn = document.getElementById('closeDelugeAddUrlModalBtn');
+const cancelDelugeAddUrlBtn = document.getElementById('cancelDelugeAddUrlBtn');
+const delugeAddUrlForm = document.getElementById('delugeAddUrlForm');
+const delugeUrlInput = document.getElementById('delugeUrlInput');
+const submitDelugeAddUrlBtn = document.getElementById('submitDelugeAddUrlBtn');
+const delugeAddUrlStatus = document.getElementById('delugeAddUrlStatus');
 
 const delugePanelStatusBadge = document.getElementById('delugePanelStatusBadge');
 
@@ -254,14 +263,81 @@ const delugeStatUlSpeed = document.getElementById('delugeStatUlSpeed');
 
 
 
+// Sobrescreve alert e confirm globais para usar o Modal Customizado com foco inicial
+function setupCustomDialogs() {
+  const modal = document.getElementById('customDialogModal');
+  const titleEl = document.getElementById('customDialogTitle');
+  const messageEl = document.getElementById('customDialogMessage');
+  const confirmBtn = document.getElementById('customDialogConfirmBtn');
+  const cancelBtn = document.getElementById('customDialogCancelBtn');
+  const closeBtn = document.getElementById('customDialogCloseBtn');
+
+  let activeResolve = null;
+
+  function showDialog(type, message, customTitle) {
+    return new Promise((resolve) => {
+      activeResolve = resolve;
+      messageEl.innerText = message;
+
+      if (type === 'confirm') {
+        titleEl.innerHTML = '<i class="ph-bold ph-question text-brand-500 text-lg"></i> <span>' + (customTitle || 'Confirmação') + '</span>';
+        cancelBtn.classList.remove('hidden');
+        confirmBtn.innerText = 'Confirmar';
+        confirmBtn.className = "py-2 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs shadow-md shadow-brand-500/10 hover:shadow-lg transition-all focus:outline-none min-w-[80px]";
+      } else {
+        titleEl.innerHTML = '<i class="ph-bold ph-info text-blue-500 text-lg"></i> <span>' + (customTitle || 'Aviso') + '</span>';
+        cancelBtn.classList.add('hidden');
+        confirmBtn.innerText = 'OK';
+        confirmBtn.className = "py-2 px-4 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-xl text-xs shadow-md shadow-brand-500/10 hover:shadow-lg transition-all focus:outline-none min-w-[80px]";
+      }
+
+      modal.classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+
+      setTimeout(() => {
+        confirmBtn.focus();
+      }, 50);
+    });
+  }
+
+  function closeDialog(value) {
+    modal.classList.add('hidden');
+    document.body.style.overflow = '';
+    if (activeResolve) {
+      activeResolve(value);
+      activeResolve = null;
+    }
+  }
+
+  confirmBtn.onclick = () => closeDialog(true);
+  cancelBtn.onclick = () => closeDialog(false);
+  closeBtn.onclick = () => closeDialog(false);
+
+  modal.onclick = (e) => {
+    if (e.target === modal) {
+      closeDialog(false);
+    }
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (!modal.classList.contains('hidden')) {
+      if (e.key === 'Escape') {
+        closeDialog(false);
+        e.preventDefault();
+      }
+    }
+  });
+
+  window.alert = (message, title) => showDialog('alert', message, title);
+  window.confirm = (message, title) => showDialog('confirm', message, title);
+}
+
 // --- INICIALIZAÇÃO ---
 
-
-
 document.addEventListener('DOMContentLoaded', () => {
+  setupCustomDialogs();
 
   // Inicialização de Tema Claro/Escuro
-
   const savedTheme = localStorage.getItem('theme') || 'dark';
 
   if (savedTheme === 'dark') {
@@ -297,7 +373,10 @@ document.addEventListener('DOMContentLoaded', () => {
   searchDelugeInput.addEventListener('input', () => renderDelugeTorrents(delugeTorrentsCache));
   clearDelugeErrorsBtn.addEventListener('click', clearDelugeErrors);
 
-  
+  if (openAddDelugeUrlBtn) openAddDelugeUrlBtn.addEventListener('click', openDelugeAddUrlModal);
+  if (closeDelugeAddUrlModalBtn) closeDelugeAddUrlModalBtn.addEventListener('click', closeDelugeAddUrlModal);
+  if (cancelDelugeAddUrlBtn) cancelDelugeAddUrlBtn.addEventListener('click', closeDelugeAddUrlModal);
+  if (delugeAddUrlForm) delugeAddUrlForm.addEventListener('submit', handleDelugeAddUrlSubmit);
 
   closeDelugeRemoveModalBtn.addEventListener('click', closeDelugeRemoveModal);
 
@@ -467,7 +546,7 @@ function logServerControlError(errorMsg) {
 }
 
 async function handleRestartServer() {
-  if (!confirm("Tem certeza que deseja REINICIAR a máquina? Todos os processos ativos serão finalizados.")) return;
+  if (!await confirm("Tem certeza que deseja REINICIAR a máquina? Todos os processos ativos serão finalizados.")) return;
 
   const btn = document.getElementById('restartServerBtn');
   const originalHtml = btn.innerHTML;
@@ -487,7 +566,7 @@ async function handleRestartServer() {
       throw new Error(data.error || `Erro HTTP ${res.status}`);
     }
     
-    alert("A máquina está sendo reiniciada. A conexão com esta página será perdida.");
+    await alert("A máquina está sendo reiniciada. A conexão com esta página será perdida.");
     setTimeout(() => {
       window.location.reload();
     }, 4000);
@@ -499,7 +578,7 @@ async function handleRestartServer() {
 }
 
 async function handleShutdownServer() {
-  if (!confirm("Tem certeza que deseja DESLIGAR a máquina? A aplicação e a máquina deixarão de funcionar até que o botão físico de energia seja pressionado.")) return;
+  if (!await confirm("Tem certeza que deseja DESLIGAR a máquina? A aplicação e a máquina deixarão de funcionar até que o botão físico de energia seja pressionado.")) return;
 
   const btn = document.getElementById('shutdownServerBtn');
   const originalHtml = btn.innerHTML;
@@ -519,7 +598,7 @@ async function handleShutdownServer() {
       throw new Error(data.error || `Erro HTTP ${res.status}`);
     }
     
-    alert("A máquina está sendo desligada. A conexão com esta página será perdida.");
+    await alert("A máquina está sendo desligada. A conexão com esta página será perdida.");
   } catch (err) {
     btn.disabled = false;
     btn.innerHTML = originalHtml;
@@ -528,7 +607,7 @@ async function handleShutdownServer() {
 }
 
 async function handleStopAllSearches() {
-  if (!confirm("Tem certeza que deseja PARAR todas as buscas ativas e pendentes e fechar todos os navegadores?")) return;
+  if (!await confirm("Tem certeza que deseja PARAR todas as buscas ativas e pendentes e fechar todos os navegadores?")) return;
 
   const btn = document.getElementById('stopAllSearchesBtn');
   const originalHtml = btn.innerHTML;
@@ -551,7 +630,7 @@ async function handleStopAllSearches() {
     }
     
   } catch (err) {
-    alert("Erro ao parar todas as buscas: " + err.message);
+    await alert("Erro ao parar todas as buscas: " + err.message);
   } finally {
     btn.disabled = false;
     btn.innerHTML = originalHtml;
@@ -559,7 +638,7 @@ async function handleStopAllSearches() {
 }
 
 async function handleRestartAllSearches() {
-  if (!confirm("Tem certeza que deseja reiniciar todas as buscas não concluídas? O processo será executado de forma sequencial (uma busca por vez).")) return;
+  if (!await confirm("Tem certeza que deseja reiniciar todas as buscas não concluídas? O processo será executado de forma sequencial (uma busca por vez).")) return;
 
   const btn = document.getElementById('restartAllSearchesBtn');
   const originalHtml = btn.innerHTML;
@@ -574,7 +653,7 @@ async function handleRestartAllSearches() {
     }
     
     const result = await res.json();
-    alert(result.message || "Buscas reiniciadas com sucesso!");
+    await alert(result.message || "Buscas reiniciadas com sucesso!");
     
     // Recarrega a lista de buscas
     await fetchSearches();
@@ -584,7 +663,7 @@ async function handleRestartAllSearches() {
     }
     
   } catch (err) {
-    alert("Erro ao reiniciar buscas: " + err.message);
+    await alert("Erro ao reiniciar buscas: " + err.message);
   } finally {
     btn.disabled = false;
     btn.innerHTML = originalHtml;
@@ -801,9 +880,9 @@ async function handleSettingsSubmit(e) {
     
     if (!res.ok) throw new Error("Erro ao gravar dados");
     const data = await res.json();
-    alert(data.message || "Configurações gravadas com sucesso.");
+    await alert(data.message || "Configurações gravadas com sucesso.");
   } catch (err) {
-    alert("Erro ao salvar: " + err.message);
+    await alert("Erro ao salvar: " + err.message);
   } finally {
     if (submitBtn) {
       submitBtn.disabled = false;
@@ -1212,7 +1291,7 @@ async function handleSourceSubmit(e) {
     closeSourceModal();
     fetchSources(); // Recarrega a listagem
   } catch (err) {
-    alert("Falha ao salvar fonte: " + err.message);
+    await alert("Falha ao salvar fonte: " + err.message);
   } finally {
     if (submitBtn) {
       submitBtn.disabled = false;
@@ -1246,7 +1325,7 @@ async function toggleSourceActive(id) {
     await fetchSources();
     showDelugeToast(`Site "${source.name}" ${newStatus ? 'ativado' : 'desativado'} com sucesso!`, "success");
   } catch (err) {
-    alert("Erro: " + err.message);
+    await alert("Erro: " + err.message);
   }
 }
 
@@ -1260,7 +1339,7 @@ async function deleteSource(id) {
 
   
 
-  if (!confirm(`Excluir a fonte de busca "${source.name}"? Isso impedirá o agente de IA de pesquisar nela.`)) return;
+  if (!await confirm(`Excluir a fonte de busca "${source.name}"? Isso impedirá o agente de IA de pesquisar nela.`)) return;
 
   
 
@@ -1276,7 +1355,7 @@ async function deleteSource(id) {
 
   } catch (err) {
 
-    alert("Erro: " + err.message);
+    await alert("Erro: " + err.message);
 
   }
 
@@ -1286,11 +1365,11 @@ async function deleteSource(id) {
 
 // Exporta as fontes de busca cadastradas para um arquivo JSON
 
-function exportSources() {
+async function exportSources() {
 
   if (searchSources.length === 0) {
 
-    alert("Nenhuma fonte de busca cadastrada para exportar.");
+    await alert("Nenhuma fonte de busca cadastrada para exportar.");
 
     return;
 
@@ -1336,7 +1415,7 @@ function exportSources() {
 
   } catch (err) {
 
-    alert("Erro ao exportar fontes de busca: " + err.message);
+    await alert("Erro ao exportar fontes de busca: " + err.message);
 
   }
 
@@ -1346,7 +1425,7 @@ function exportSources() {
 
 // Importa fontes de busca a partir de um arquivo JSON
 
-function importSources() {
+async function importSources() {
 
   const fileInput = document.createElement('input');
 
@@ -1412,13 +1491,13 @@ function importSources() {
 
         const result = await res.json();
 
-        alert(result.message || "Fontes de busca importadas com sucesso.");
+        await alert(result.message || "Fontes de busca importadas com sucesso.");
 
         fetchSources(); // Recarrega do banco
 
       } catch (err) {
 
-        alert("Erro na importação: " + err.message);
+        await alert("Erro na importação: " + err.message);
 
       }
 
@@ -1593,11 +1672,8 @@ async function selectSearch(id) {
     }
 
   } catch (err) {
-
-    alert("Falha ao selecionar busca: " + err.message);
-
+    await alert("Falha ao selecionar busca: " + err.message);
   }
-
 }
 
 async function handleSearchClick(id) {
@@ -1609,8 +1685,6 @@ async function handleSearchClick(id) {
     }
   }, 100);
 }
-
-
 
 async function handleSearchSubmit(e) {
   e.preventDefault();
@@ -1645,7 +1719,7 @@ async function handleSearchSubmit(e) {
     selectSearch(newSearch.id);
     queryInput.value = ''; // limpa o input
   } catch (err) {
-    alert("Erro: " + err.message);
+    await alert("Erro: " + err.message);
   } finally {
     if (submitBtn) {
       submitBtn.disabled = false;
@@ -1654,10 +1728,7 @@ async function handleSearchSubmit(e) {
   }
 }
 
-
-
 // Para a busca ativa
-
 async function stopActiveSearch() {
   if (!activeSearchId) return;
 
@@ -1673,7 +1744,7 @@ async function stopActiveSearch() {
     
     updateActiveSearchStatusUI('stopped');
   } catch (err) {
-    alert("Erro: " + err.message);
+    await alert("Erro: " + err.message);
   } finally {
     if (stopSearchBtn) {
       stopSearchBtn.disabled = false;
@@ -1690,7 +1761,7 @@ async function restartActiveSearch(resume) {
     ? "Deseja retomar a busca de onde parou? (O agente continuará avaliando apenas novos torrents)"
     : "Tem certeza que deseja reiniciar do zero? Todos os resultados e logs desta busca serão apagados.";
     
-  if (!confirm(confirmMsg)) return;
+  if (!await confirm(confirmMsg)) return;
 
   const btn = resume ? resumeSearchBtn : restartSearchBtn;
   const originalHtml = btn ? btn.innerHTML : null;
@@ -1721,7 +1792,7 @@ async function restartActiveSearch(resume) {
     
     openSSE(activeSearchId);
   } catch (err) {
-    alert("Erro: " + err.message);
+    await alert("Erro: " + err.message);
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -1730,48 +1801,26 @@ async function restartActiveSearch(resume) {
   }
 }
 
-
-
 // Exclui busca
-
 async function deleteSearch(id, event) {
-
   event.stopPropagation();
 
-  
-
-  if (!confirm("Excluir esta busca e todos os seus resultados permanentemente?")) return;
-
-  
+  if (!await confirm("Excluir esta busca e todos os seus resultados permanentemente?")) return;
 
   try {
-
     const res = await fetch(`/api/searches/${id}`, { method: 'DELETE' });
-
     if (!res.ok) throw new Error("Erro ao excluir busca");
-
     
-
     if (activeSearchId === id) {
-
       showNewSearchForm();
-
     }
-
     
-
     searches = searches.filter(s => s.id !== id);
-
     updateStats();
-
     renderSearchesList();
-
   } catch (err) {
-
-    alert("Falha ao excluir busca: " + err.message);
-
+    await alert("Falha ao excluir busca: " + err.message);
   }
-
 }
 
 
@@ -2629,9 +2678,9 @@ function copyToClipboard(text, buttonEl) {
 
     }, 2000);
 
-  }).catch(err => {
+  }).catch(async err => {
 
-    alert("Erro ao copiar para clipboard: " + err.message);
+    await alert("Erro ao copiar para clipboard: " + err.message);
 
   });
 
@@ -2639,7 +2688,7 @@ function copyToClipboard(text, buttonEl) {
 
 
 
-function copyAllMagnetLinks() {
+async function copyAllMagnetLinks() {
 
   if (activeSearchData.results.length === 0) return;
 
@@ -2665,9 +2714,9 @@ function copyAllMagnetLinks() {
 
     }, 2000);
 
-  }).catch(err => {
+  }).catch(async err => {
 
-    alert("Erro ao copiar magnets: " + err.message);
+    await alert("Erro ao copiar magnets: " + err.message);
 
   });
 
@@ -3095,7 +3144,7 @@ async function downloadAllTorrentsInDeluge() {
 
   } catch (err) {
 
-    alert("Erro ao enviar múltiplos torrents: " + err.message);
+    await alert("Erro ao enviar múltiplos torrents: " + err.message);
 
     downloadAllDelugeBtn.disabled = false;
 
@@ -3119,7 +3168,7 @@ async function pauseDelugeTorrent(id) {
 
   } catch (err) {
 
-    alert("Erro ao pausar torrent: " + err.message);
+    await alert("Erro ao pausar torrent: " + err.message);
 
   }
 
@@ -3141,13 +3190,93 @@ async function resumeDelugeTorrent(id) {
 
   } catch (err) {
 
-    alert("Erro ao retomar torrent: " + err.message);
+    await alert("Erro ao retomar torrent: " + err.message);
 
   }
 
 }
 
 
+
+function openDelugeAddUrlModal() {
+  if (!delugeAddUrlModal) return;
+  if (delugeUrlInput) delugeUrlInput.value = '';
+  if (delugeAddUrlStatus) {
+    delugeAddUrlStatus.classList.add('hidden');
+    delugeAddUrlStatus.innerHTML = '';
+  }
+  delugeAddUrlModal.classList.remove('hidden');
+  if (delugeUrlInput) delugeUrlInput.focus();
+}
+
+function closeDelugeAddUrlModal() {
+  if (!delugeAddUrlModal) return;
+  delugeAddUrlModal.classList.add('hidden');
+}
+
+async function handleDelugeAddUrlSubmit(e) {
+  e.preventDefault();
+  const urlVal = delugeUrlInput ? delugeUrlInput.value.trim() : '';
+  if (!urlVal) return;
+
+  submitDelugeAddUrlBtn.disabled = true;
+  const origBtnText = submitDelugeAddUrlBtn.innerHTML;
+  submitDelugeAddUrlBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Processando...`;
+
+  if (delugeAddUrlStatus) {
+    delugeAddUrlStatus.classList.remove('hidden');
+    delugeAddUrlStatus.className = "text-xs p-3 rounded-xl flex items-center gap-2 font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300";
+    delugeAddUrlStatus.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-emerald-500"></i> Analisando link/URL e adicionando ao Deluge...`;
+  }
+
+  try {
+    const res = await fetch('/api/deluge/add-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: urlVal })
+    });
+
+    const data = await res.json();
+
+    if (data.success) {
+      const { totalFound, addedCount, existingCount } = data;
+      let msg = '';
+      if (addedCount > 0) {
+        msg = `${addedCount} torrent(s) adicionado(s) com sucesso!`;
+        if (existingCount > 0) msg += ` (${existingCount} já existia(m))`;
+      } else if (existingCount > 0) {
+        msg = `Os torrents encontrados (${existingCount}) já estão na fila do Deluge.`;
+      } else {
+        msg = `Nenhum torrent novo foi adicionado.`;
+      }
+
+      if (delugeAddUrlStatus) {
+        delugeAddUrlStatus.className = "text-xs p-3 rounded-xl flex items-center gap-2 font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20";
+        delugeAddUrlStatus.innerHTML = `<i class="ph-bold ph-check-circle text-base"></i> ${msg}`;
+      }
+
+      if (typeof fetchDelugeTorrents === 'function') fetchDelugeTorrents();
+      if (typeof showDelugeToast === 'function') showDelugeToast(msg, addedCount > 0 ? 'success' : 'warning');
+
+      setTimeout(() => {
+        closeDelugeAddUrlModal();
+      }, 1500);
+    } else {
+      if (delugeAddUrlStatus) {
+        delugeAddUrlStatus.className = "text-xs p-3 rounded-xl flex items-center gap-2 font-medium bg-red-500/10 text-red-650 dark:text-red-400 border border-red-500/20";
+        delugeAddUrlStatus.innerHTML = `<i class="ph-bold ph-warning-circle text-base"></i> ${data.error || 'Erro ao processar URL/Magnet Link.'}`;
+      }
+    }
+  } catch (err) {
+    if (delugeAddUrlStatus) {
+      delugeAddUrlStatus.className = "text-xs p-3 rounded-xl flex items-center gap-2 font-medium bg-red-500/10 text-red-650 dark:text-red-400 border border-red-500/20";
+      delugeAddUrlStatus.innerHTML = `<i class="ph-bold ph-warning-circle text-base"></i> Erro de conexão: ${err.message}`;
+    }
+  } finally {
+    submitDelugeAddUrlBtn.disabled = false;
+    submitDelugeAddUrlBtn.innerHTML = origBtnText;
+  }
+}
 
 function openDelugeRemoveModal(id, name) {
 
@@ -3207,7 +3336,7 @@ async function confirmRemoveTorrent(deleteData) {
 
   } catch (err) {
 
-    alert("Erro ao remover torrent: " + err.message);
+    await alert("Erro ao remover torrent: " + err.message);
 
   }
 
@@ -3268,11 +3397,11 @@ async function clearDelugeErrors() {
   const errorTorrents = Object.keys(torrents).filter(id => torrents[id].state === 'Error');
   
   if (errorTorrents.length === 0) {
-    alert("Nenhum torrent com erro foi detectado no momento.");
+    await alert("Nenhum torrent com erro foi detectado no momento.");
     return;
   }
   
-  const confirmClean = confirm(`Deseja remover todos os ${errorTorrents.length} torrents em estado de erro? Esta ação também excluirá os arquivos no disco e é irreversível.`);
+  const confirmClean = await confirm(`Deseja remover todos os ${errorTorrents.length} torrents em estado de erro? Esta ação também excluirá os arquivos no disco e é irreversível.`);
   if (!confirmClean) return;
   
   try {
@@ -3288,13 +3417,13 @@ async function clearDelugeErrors() {
     
     const data = await res.json();
     if (data.success) {
-      alert(`${data.count} torrent(s) com erro foram removidos com sucesso.`);
+      await alert(`${data.count} torrent(s) com erro foram removidos com sucesso.`);
       fetchDelugeTorrents();
     } else {
       throw new Error(data.error || "Erro ao apagar torrents");
     }
   } catch (err) {
-    alert("Erro ao remover torrents com erro: " + err.message);
+    await alert("Erro ao remover torrents com erro: " + err.message);
   } finally {
     clearDelugeErrorsBtn.disabled = false;
     clearDelugeErrorsBtn.innerHTML = `<i class="ph-bold ph-trash"></i> Apagar Erros`;
