@@ -128,6 +128,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const deleteModalList = document.getElementById('delete-modal-list');
   const btnDeleteConfirm = document.getElementById('btn-delete-confirm');
   const btnDeleteCancel = document.getElementById('btn-delete-cancel');
+  const deleteProgressContainer = document.getElementById('delete-progress-container');
+  const deleteProgressStatus = document.getElementById('delete-progress-status');
+  const deleteProgressText = document.getElementById('delete-progress-text');
+  const deleteProgressBar = document.getElementById('delete-progress-bar');
   
   // Disk space elements
   const diskThunterText = document.getElementById('disk-thunter-text');
@@ -762,6 +766,24 @@ document.addEventListener('DOMContentLoaded', () => {
     currentDeletionTarget = items;
     deleteModalList.innerHTML = '';
     
+    // Reseta estado da barra de progresso e botões
+    if (deleteProgressContainer) {
+      deleteProgressContainer.classList.add('hidden');
+      deleteProgressBar.style.width = '0%';
+      deleteProgressText.textContent = '0 / 0 (0%)';
+      deleteProgressStatus.textContent = 'Aguardando confirmação...';
+    }
+
+    if (btnDeleteConfirm) {
+      btnDeleteConfirm.disabled = false;
+      btnDeleteConfirm.classList.remove('opacity-50', 'cursor-not-allowed');
+      btnDeleteConfirm.innerHTML = 'Confirmar Exclusão';
+    }
+    if (btnDeleteCancel) {
+      btnDeleteCancel.disabled = false;
+      btnDeleteCancel.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+
     items.forEach(item => {
       const div = document.createElement('div');
       div.className = "flex items-center gap-2 py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-b-0";
@@ -787,6 +809,7 @@ document.addEventListener('DOMContentLoaded', () => {
     deleteConfirmModal.firstElementChild.classList.add('scale-95');
     setTimeout(() => {
       deleteConfirmModal.classList.add('hidden');
+      if (deleteProgressContainer) deleteProgressContainer.classList.add('hidden');
       currentDeletionTarget = null;
     }, 150);
   }
@@ -794,43 +817,93 @@ document.addEventListener('DOMContentLoaded', () => {
   async function executeDeletion() {
     if (!currentDeletionTarget || currentDeletionTarget.length === 0) return;
     
-    const itemsToDelete = currentDeletionTarget;
-    closeDeleteConfirm();
-    
-    loadingOverlay.querySelector('#loading-text').textContent = "Apagando do servidor...";
-    loadingOverlay.classList.remove('hidden');
+    const itemsToDelete = [...currentDeletionTarget];
+    const total = itemsToDelete.length;
+
+    // Exibe container de progresso e desabilita botões
+    if (deleteProgressContainer) {
+      deleteProgressContainer.classList.remove('hidden');
+      deleteProgressBar.style.width = '0%';
+      deleteProgressText.textContent = `0 / ${total} (0%)`;
+      deleteProgressStatus.textContent = 'Iniciando exclusão...';
+    }
+
+    if (btnDeleteConfirm) {
+      btnDeleteConfirm.disabled = true;
+      btnDeleteConfirm.classList.add('opacity-50', 'cursor-not-allowed');
+      btnDeleteConfirm.innerHTML = '<i class="ph-bold ph-spinner animate-spin"></i> Excluindo...';
+    }
+    if (btnDeleteCancel) {
+      btnDeleteCancel.disabled = true;
+      btnDeleteCancel.classList.add('opacity-50', 'cursor-not-allowed');
+    }
+
     hidePanel();
 
-    const paths = itemsToDelete.map(item => item.path);
+    let successCount = 0;
+    let deletedPaths = [];
 
-    try {
-      const res = await fetch('/api/storage/delete', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths })
-      });
+    for (let i = 0; i < total; i++) {
+      const item = itemsToDelete[i];
+      const startPercent = Math.round((i / total) * 100);
 
-      const result = await res.json();
-      if (result.success) {
-        // Se deletamos a pasta que estávamos navegando no momento, volta para a anterior ou raiz
-        paths.forEach(p => {
-          if (currentFolderNode && currentFolderNode.path === p) {
-            if (navigationHistory.length > 0) {
-              currentFolderNode = navigationHistory.pop();
-            } else {
-              currentFolderNode = null;
-            }
-          }
-        });
-        await loadTree();
-      } else {
-        await alert('Erro ao apagar: ' + (result.error || 'Erro desconhecido'));
-        loadingOverlay.classList.add('hidden');
+      if (deleteProgressStatus) {
+        deleteProgressStatus.textContent = `Excluindo (${i + 1}/${total}): ${item.name}`;
       }
-    } catch (err) {
-      await alert('Falha ao comunicar com servidor: ' + err.message);
-      loadingOverlay.classList.add('hidden');
+      if (deleteProgressBar) {
+        deleteProgressBar.style.width = `${startPercent}%`;
+      }
+      if (deleteProgressText) {
+        deleteProgressText.textContent = `${i} / ${total} (${startPercent}%)`;
+      }
+
+      try {
+        const res = await fetch('/api/storage/delete', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: [item.path] })
+        });
+
+        const result = await res.json();
+        if (result.success) {
+          successCount++;
+          deletedPaths.push(item.path);
+        } else {
+          console.error(`Erro ao apagar ${item.name}:`, result.error);
+        }
+      } catch (err) {
+        console.error(`Falha ao comunicar com servidor para ${item.name}:`, err);
+      }
+
+      const endPercent = Math.round(((i + 1) / total) * 100);
+      if (deleteProgressBar) {
+        deleteProgressBar.style.width = `${endPercent}%`;
+      }
+      if (deleteProgressText) {
+        deleteProgressText.textContent = `${i + 1} / ${total} (${endPercent}%)`;
+      }
     }
+
+    if (deleteProgressStatus) {
+      deleteProgressStatus.textContent = `Exclusão concluída (${successCount}/${total})`;
+    }
+
+    if (deletedPaths.length > 0) {
+      deletedPaths.forEach(p => {
+        if (currentFolderNode && currentFolderNode.path === p) {
+          if (navigationHistory.length > 0) {
+            currentFolderNode = navigationHistory.pop();
+          } else {
+            currentFolderNode = null;
+          }
+        }
+      });
+      await loadTree();
+    }
+
+    setTimeout(() => {
+      closeDeleteConfirm();
+    }, 600);
   }
 
   // Switch View modes
@@ -912,6 +985,10 @@ document.addEventListener('DOMContentLoaded', () => {
       openDeleteConfirm([selectedItem]);
     }
   });
+
+  // Modal Deletion Actions
+  if (btnDeleteConfirm) btnDeleteConfirm.addEventListener('click', executeDeletion);
+  if (btnDeleteCancel) btnDeleteCancel.addEventListener('click', closeDeleteConfirm);
 
   // Search input & recursive filter events
   if (fileSearchInput) {

@@ -258,6 +258,17 @@
         <!-- List of items to be deleted -->
       </div>
 
+      <!-- Barra de Progresso das Exclusões -->
+      <div id="delete-progress-container" class="hidden space-y-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+        <div class="flex items-center justify-between text-xs font-medium text-slate-600 dark:text-slate-400">
+          <span id="delete-progress-status" class="truncate max-w-[240px]">Excluindo...</span>
+          <span id="delete-progress-text" class="font-bold text-red-600 dark:text-red-400 ml-2">0 / 0 (0%)</span>
+        </div>
+        <div class="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-2 overflow-hidden">
+          <div id="delete-progress-bar" class="bg-gradient-to-r from-red-500 to-rose-600 h-full w-0 transition-all duration-300 rounded-full"></div>
+        </div>
+      </div>
+
       <div class="flex items-center justify-end gap-2.5 mt-2">
         <button id="btn-delete-cancel" type="button" class="py-2 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors focus:outline-none flex-none w-auto">
           Cancelar
