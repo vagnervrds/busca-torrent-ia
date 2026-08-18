@@ -978,6 +978,45 @@ document.addEventListener('DOMContentLoaded', () => {
   btnDiscover.addEventListener('click', discoverPath);
   btnDiscoverOverlay.addEventListener('click', discoverPath);
   
+  const btnCheckClean = document.getElementById('btn-check-clean-storage');
+  if (btnCheckClean) {
+    btnCheckClean.addEventListener('click', async () => {
+      const originalHtml = btnCheckClean.innerHTML;
+      btnCheckClean.disabled = true;
+      btnCheckClean.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Verificando...`;
+
+      try {
+        const res = await fetch('/api/storage/check-cleanup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ simulatedSizeMB: 10 })
+        });
+        const data = await res.json();
+
+        if (!data.success) {
+          await window.alert("Aviso de Armazenamento:\n\n" + (data.error || "Não foi possível verificar o espaço."), "Espaço em Disco");
+        } else {
+          await window.alert(data.message, "Verificação de Limpeza");
+        }
+
+        btnCheckClean.innerHTML = `<i class="ph-bold ph-check text-sm"></i> Concluído!`;
+        btnCheckClean.classList.add('bg-emerald-600', 'hover:bg-emerald-700');
+
+        loadTree();
+
+        setTimeout(() => {
+          btnCheckClean.disabled = false;
+          btnCheckClean.innerHTML = originalHtml;
+          btnCheckClean.classList.remove('bg-emerald-600', 'hover:bg-emerald-700');
+        }, 3000);
+      } catch (err) {
+        btnCheckClean.disabled = false;
+        btnCheckClean.innerHTML = originalHtml;
+        await window.alert("Erro ao executar verificação: " + err.message, "Erro");
+      }
+    });
+  }
+  
   // ECharts Item Panel Actions
   btnClosePanel.addEventListener('click', hidePanel);
   btnDelete.addEventListener('click', () => {

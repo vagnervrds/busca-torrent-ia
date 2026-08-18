@@ -3,3 +3,5 @@ database.sqlite
 .env
 .DS_Store
 tmp/
+*.log
+

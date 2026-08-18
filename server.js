@@ -1739,11 +1739,23 @@ function parseSizeBytes(sizeInput) {
   return 0;
 }
 
-async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
-  const size = parseSizeBytes(torrentSizeInBytes);
-  if (!size || size <= 0) {
-    return { success: true, freed: 0 };
+// Helper para gravar logs de armazenamento no arquivo storage_cleanup.log e no console
+function writeStorageLog(message) {
+  const now = new Date();
+  const timestamp = now.toLocaleString('pt-BR');
+  const logLine = `[${timestamp}] ${message}\n`;
+  console.log(`[StorageLog] ${message}`);
+  try {
+    const logFilePath = path.join(__dirname, 'storage_cleanup.log');
+    fs.appendFileSync(logFilePath, logLine, 'utf8');
+  } catch (err) {
+    console.error('[StorageLog] Erro ao gravar no arquivo de log:', err.message);
   }
+}
+
+async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
+  const parsed = parseSizeBytes(torrentSizeInBytes);
+  const size = (parsed && parsed > 0) ? parsed : 0;
 
   // Consulta limite mínimo de espaço livre em disco a ser mantido na unidade (padrão 4GB)
   const minSetting = await SystemSetting.findOne({ where: { key: 'minFreeSpaceGB' } });
@@ -1781,13 +1793,15 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
   const autoDeleteEnabled = setting ? (setting.value === 'true' || setting.value === '1') : true;
 
   if (!autoDeleteEnabled) {
+    const errorMsg = `Espaço em disco insuficiente. Necessário: ${formatBytes(requiredSpace)} (${size > 0 ? formatBytes(size) + ' + 10% + ' : ''}${minFreeGB} GB livres a manter), Disponível: ${formatBytes(diskSpace.free)}. A exclusão automática de arquivos antigos está desativada nas configurações.`;
+    writeStorageLog(`[Alerta] ${errorMsg}`);
     return {
       success: false,
-      error: `Espaço em disco insuficiente. Necessário: ${formatBytes(requiredSpace)} (${formatBytes(size)} + 10% + ${minFreeGB} GB livres a manter), Disponível: ${formatBytes(diskSpace.free)}. A exclusão automática de arquivos antigos está desativada nas configurações.`
+      error: errorMsg
     };
   }
 
-  console.log(`[Storage] Espaço insuficiente (${formatBytes(diskSpace.free)} livre / ${formatBytes(requiredSpace)} necessário incluindo reserva de ${minFreeGB} GB). Iniciando remoção automática dos arquivos mais antigos...`);
+  writeStorageLog(`[Storage] Espaço em disco insuficiente (${formatBytes(diskSpace.free)} livre / ${formatBytes(requiredSpace)} necessário com reserva de ${minFreeGB} GB). Iniciando remoção automática dos arquivos mais antigos...`);
 
   function getItemStats(dir) {
     const items = [];
@@ -1850,7 +1864,7 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
     }
 
     try {
-      console.log(`[Storage] Apagando item antigo: ${item.name} (${formatBytes(item.size)}, modificado em ${new Date(item.mtimeMs).toISOString()})`);
+      writeStorageLog(`[Storage] Apagando item antigo: ${item.name} (${formatBytes(item.size)}, modificado em ${new Date(item.mtimeMs).toLocaleString('pt-BR')})`);
       fs.rmSync(item.path, { recursive: true, force: true });
       freedBytes += item.size;
       currentFree += item.size;
@@ -1860,24 +1874,141 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
         currentFree = updatedDisk.free;
       }
     } catch (rmErr) {
-      console.error(`[Storage] Erro ao apagar ${item.path}:`, rmErr.message);
+      writeStorageLog(`[Storage] Erro ao apagar ${item.path}: ${rmErr.message}`);
     }
   }
 
   if (freedBytes > 0) {
     await invalidateCache('storage_tree');
+    writeStorageLog(`[Storage] Limpeza executada com sucesso! Total liberado: ${formatBytes(freedBytes)}. Espaço livre atual: ${formatBytes(currentFree)}.`);
   }
 
   if (currentFree < requiredSpace) {
+    const failMsg = `Espaço em disco insuficiente mesmo após apagar arquivos antigos. Necessário: ${formatBytes(requiredSpace)}, Disponível após limpeza: ${formatBytes(currentFree)}.`;
+    writeStorageLog(`[Erro] ${failMsg}`);
     return {
       success: false,
-      error: `Espaço em disco insuficiente mesmo após apagar arquivos antigos. Necessário: ${formatBytes(requiredSpace)}, Disponível após limpeza: ${formatBytes(currentFree)}.`
+      error: failMsg
     };
   }
 
-  console.log(`[Storage] Espaço liberado com sucesso! Espaço livre atual: ${formatBytes(currentFree)} (Necessário: ${formatBytes(requiredSpace)})`);
   return { success: true, freed: freedBytes };
 }
+
+// Rota para verificar e executar limpeza de disco simulando download (ex: 10 MB)
+app.post('/api/storage/check-cleanup', async (req, res) => {
+  try {
+    const { simulatedSizeMB } = req.body || {};
+    const sizeMB = typeof simulatedSizeMB === 'number' && simulatedSizeMB > 0 ? simulatedSizeMB : 10;
+    const simulatedSizeInBytes = Math.round(sizeMB * 1024 * 1024);
+
+    writeStorageLog(`[Manual] Verificação de limpeza acionada via botão (simulando torrent de ${sizeMB} MB)...`);
+    const result = await ensureDiskSpaceForTorrent(simulatedSizeInBytes);
+
+    const downloadPath = await discoverDelugePath();
+    const diskSpace = downloadPath ? await getDiskSpace(downloadPath) : null;
+
+    const minSetting = await SystemSetting.findOne({ where: { key: 'minFreeSpaceGB' } });
+    const minFreeGB = minSetting ? (parseFloat(minSetting.value) || 4) : 4;
+
+    if (!result.success) {
+      writeStorageLog(`[Manual] Verificação concluída com aviso: ${result.error}`);
+      return res.json({
+        success: false,
+        error: result.error,
+        freed: result.freed || 0,
+        freedFormatted: formatBytes(result.freed || 0),
+        minFreeGB,
+        diskSpace
+      });
+    }
+
+    const logMsg = result.freed > 0
+      ? `Verificação concluída! ${formatBytes(result.freed)} de arquivos antigos foram removidos para manter os ${minFreeGB} GB de espaço livre.`
+      : `Verificação concluída! O espaço livre atual (${diskSpace ? formatBytes(diskSpace.free) : 'N/A'}) já atende ao limite mínimo configurado (${minFreeGB} GB + ${sizeMB} MB de margem). Nenhuma exclusão foi necessária.`;
+
+    writeStorageLog(`[Manual] ${logMsg}`);
+
+    res.json({
+      success: true,
+      freed: result.freed || 0,
+      freedFormatted: formatBytes(result.freed || 0),
+      minFreeGB,
+      currentFreeFormatted: diskSpace ? formatBytes(diskSpace.free) : 'N/A',
+      message: logMsg
+    });
+  } catch (err) {
+    writeStorageLog(`[Manual] Erro na rota /api/storage/check-cleanup: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Rota para ler os logs do arquivo de limpeza
+app.get('/api/storage/logs', async (req, res) => {
+  try {
+    const logFilePath = path.join(__dirname, 'storage_cleanup.log');
+    if (!fs.existsSync(logFilePath)) {
+      return res.json({ success: true, logs: 'Nenhum log gravado ainda.' });
+    }
+    const content = fs.readFileSync(logFilePath, 'utf8');
+    const lines = content.trim().split('\n').slice(-100).join('\n');
+    res.json({ success: true, logs: lines });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Função de verificação de armazenamento executada na inicialização do servidor
+async function runStartupStorageCheck() {
+  writeStorageLog('-----------------------------------------------------------');
+  writeStorageLog('[Startup] Executando verificação automática de armazenamento na inicialização da aplicação...');
+  try {
+    const simulatedSizeInBytes = 10 * 1024 * 1024; // 10 MB
+    const result = await ensureDiskSpaceForTorrent(simulatedSizeInBytes);
+
+    const downloadPath = await discoverDelugePath();
+    const diskSpace = downloadPath ? await getDiskSpace(downloadPath) : null;
+    const minSetting = await SystemSetting.findOne({ where: { key: 'minFreeSpaceGB' } });
+    const minFreeGB = minSetting ? (parseFloat(minSetting.value) || 4) : 4;
+
+    if (!result.success) {
+      writeStorageLog(`[Startup] Alerta na verificação inicial de armazenamento: ${result.error}`);
+    } else if (result.freed > 0) {
+      writeStorageLog(`[Startup] Limpeza de inicialização concluída! ${formatBytes(result.freed)} liberados de arquivos antigos. Espaço livre atual: ${diskSpace ? formatBytes(diskSpace.free) : 'N/A'} (Cota mínima: ${minFreeGB} GB).`);
+    } else {
+      writeStorageLog(`[Startup] Verificação de inicialização concluída. O espaço livre atual (${diskSpace ? formatBytes(diskSpace.free) : 'N/A'}) já atende à cota mínima configurada (${minFreeGB} GB). Nenhuma exclusão necessária.`);
+    }
+  } catch (err) {
+    writeStorageLog(`[Startup] Erro ao executar verificação de armazenamento na inicialização: ${err.message}`);
+  }
+  writeStorageLog('-----------------------------------------------------------');
+}
+
+// Rota para obter rapidamente o espaço em disco (Total, Livre, Usado) da unidade monitorada pelo Deluge
+app.get('/api/storage/disk-info', async (req, res) => {
+  try {
+    const downloadPath = await discoverDelugePath();
+    if (!downloadPath || !fs.existsSync(downloadPath)) {
+      return res.status(400).json({ success: false, error: 'Caminho do Deluge não encontrado.' });
+    }
+    const disk = await getDiskSpace(downloadPath);
+    if (!disk) {
+      return res.status(500).json({ success: false, error: 'Não foi possível obter espaço em disco.' });
+    }
+    res.json({
+      success: true,
+      total: disk.total,
+      free: disk.free,
+      used: disk.used,
+      totalFormatted: formatBytes(disk.total),
+      freeFormatted: formatBytes(disk.free),
+      usedFormatted: formatBytes(disk.used),
+      downloadPath
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 app.get('/api/storage/tree', async (req, res) => {
   try {
@@ -2218,6 +2349,13 @@ liberarPortaServidor().catch(err => {
     discoverDelugePath().catch(err => {
       console.error("Erro ao descobrir o caminho inicial do Deluge:", err.message);
     });
+
+    // Executa a verificação inicial de armazenamento na inicialização da aplicação (respeitando os limites)
+    setTimeout(() => {
+      runStartupStorageCheck().catch(err => {
+        writeStorageLog(`[Startup] Erro na verificação inicial de armazenamento: ${err.message}`);
+      });
+    }, 3000); // 3 segundos após boot
 
     // Executa a verificação inicial das páginas monitoradas ao iniciar o servidor
     setTimeout(() => {

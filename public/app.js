@@ -885,12 +885,38 @@ async function fetchSettings() {
       }
     }
 
+    // Atualiza estatísticas de tamanho total e espaço livre do disco
+    updateDiskSpaceInfo();
+
   } catch (err) {
 
     console.error("Erro ao carregar configurações:", err);
 
   }
 
+}
+
+// Buscar e atualizar dados de espaço em disco (Total e Livre) no bloco de Armazenamento
+async function updateDiskSpaceInfo() {
+  const totalEl = document.getElementById('diskTotalSpace');
+  const freeEl = document.getElementById('diskFreeSpace');
+  if (!totalEl && !freeEl) return;
+
+  try {
+    const res = await fetch('/api/storage/disk-info');
+    const data = await res.json();
+    if (data.success) {
+      if (totalEl) totalEl.textContent = data.totalFormatted;
+      if (freeEl) freeEl.textContent = data.freeFormatted;
+    } else {
+      if (totalEl) totalEl.textContent = 'Indisponível';
+      if (freeEl) freeEl.textContent = 'Indisponível';
+    }
+  } catch (err) {
+    console.error('Erro ao obter informações do disco:', err);
+    if (totalEl) totalEl.textContent = 'Erro ao carregar';
+    if (freeEl) freeEl.textContent = 'Erro ao carregar';
+  }
 }
 
 // Helper genérico para salvar blocos de configurações independentes com feedback visual
@@ -958,6 +984,45 @@ async function saveStorageSettings(btn) {
   };
 
   await savePartialSettings(payload, btn, "Espaço");
+}
+
+// Verificar e Limpar Arquivos Antigos (simulando 10MB)
+async function checkAndCleanStorage(btn) {
+  if (!btn || btn.disabled) return;
+
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Verificando...`;
+
+  try {
+    const res = await fetch('/api/storage/check-cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ simulatedSizeMB: 10 })
+    });
+    const data = await res.json();
+
+    if (!data.success) {
+      await alert("Aviso de Armazenamento:\n\n" + (data.error || "Não foi possível verificar o espaço."));
+    } else {
+      await alert(data.message);
+    }
+
+    updateDiskSpaceInfo();
+
+    btn.innerHTML = `<i class="ph-bold ph-check text-sm"></i> Verificado!`;
+    btn.classList.add('bg-emerald-600', 'hover:bg-emerald-700', 'text-white');
+
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+      btn.classList.remove('bg-emerald-600', 'hover:bg-emerald-700', 'text-white');
+    }, 3000);
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    await alert("Erro ao executar verificação de espaço: " + err.message);
+  }
 }
 
 // Redescobrir caminho da pasta do Deluge
