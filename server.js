@@ -1,6 +1,8 @@
+require('./logger');
 const express = require('express');
 const path = require('path');
 const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry, MonitoredPage, sequelize } = require('./database');
+const { Op } = require('sequelize');
 const { enqueueSearch, stopSearchAgent, stopAllSearchAgents, testConnection, analyzeSearchSource, cancelSearchSourceAnalysis, analysisEvents } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
@@ -939,6 +941,12 @@ app.post('/api/deluge/add', async (req, res) => {
     const client = await getDelugeClient();
     const torrentId = await client.addMagnet(magnetLink);
     await invalidateCache('deluge_torrents');
+
+    const initialSize = parseSizeBytes(size || magnetLink);
+    if (initialSize === 0 && torrentId) {
+      monitorTorrentMetadataAndEnsureSpace(torrentId);
+    }
+
     res.json({ success: true, torrentId });
   } catch (err) {
     // Torrent já existe na sessão — não é um erro real
@@ -970,6 +978,11 @@ app.post('/api/deluge/add-multiple', async (req, res) => {
         }
         const torrentId = await client.addMagnet(magnet);
         results.push({ magnetLink: magnet, success: true, torrentId });
+
+        const initialSize = parseSizeBytes(itemSize);
+        if (initialSize === 0 && torrentId) {
+          monitorTorrentMetadataAndEnsureSpace(torrentId);
+        }
       } catch (err) {
         // Torrent já existe na sessão — não é um erro real
         if (err.message && err.message.includes('already in session')) {
@@ -1158,21 +1171,69 @@ function extractAllTorrentsFromHtml(htmlOrText) {
   return resultsMap;
 }
 
-// Helper para normalizar URLs e evitar duplicadas no banco
+// Helper para normalizar URLs preservando barras e caminhos exatos
 function normalizePageUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return '';
   let trimmed = rawUrl.trim();
   try {
     const parsed = new URL(trimmed);
-    let normalized = `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${parsed.pathname}`;
-    if (normalized.length > 10 && normalized.endsWith('/')) {
-      normalized = normalized.slice(0, -1);
-    }
-    if (parsed.search) normalized += parsed.search;
+    // Preserva o pathname original (com ou sem barra final) e normaliza protocolo e hostname
+    let normalized = `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${parsed.pathname}${parsed.search}`;
     return normalized;
   } catch (e) {
-    return trimmed.endsWith('/') && trimmed.length > 10 ? trimmed.slice(0, -1) : trimmed;
+    return trimmed;
   }
+}
+
+// Retorna as variações possíveis de uma URL (com e sem barra no final) para busca sem duplicadas no banco
+function getUrlVariants(rawUrl) {
+  const norm = normalizePageUrl(rawUrl);
+  if (!norm) return [];
+  const alt = norm.endsWith('/') ? norm.slice(0, -1) : `${norm}/`;
+  return [norm, alt];
+}
+
+// Faz fetch HTTP com fallback automático para tentar com/sem barra no final caso retorne 404
+async function fetchPageWithFallback(targetUrl) {
+  let workingUrl = targetUrl;
+  let response = null;
+  let html = null;
+
+  try {
+    response = await fetch(workingUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      redirect: 'follow'
+    });
+
+    // Se retornar 404, tenta a variação com ou sem barra no final
+    if (response.status === 404) {
+      const altUrl = workingUrl.endsWith('/') ? workingUrl.slice(0, -1) : `${workingUrl}/`;
+      try {
+        const altResponse = await fetch(altUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          },
+          redirect: 'follow'
+        });
+        if (altResponse.ok) {
+          response = altResponse;
+          workingUrl = altUrl;
+        }
+      } catch (e) {}
+    }
+
+    if (response && response.ok) {
+      html = await response.text();
+    }
+  } catch (err) {
+    console.error(`Erro ao acessar a URL via fetch (${workingUrl}):`, err.message);
+  }
+
+  return { workingUrl, response, html };
 }
 
 // Adiciona torrents via Magnet Link direto ou extraindo TODOS os Magnet Links com Títulos de uma URL de página web
@@ -1186,29 +1247,23 @@ app.post('/api/deluge/add-url', async (req, res) => {
 
   try {
     const magnetsFoundMap = new Map(); // magnet -> title
+    let workingUrl = inputStr;
+    let html = null;
+    let renderedHtml = null;
 
     // 1. Tenta extrair magnet links do próprio texto informado
     const directTorrents = extractAllTorrentsFromHtml(inputStr);
     directTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
 
-    // 2. Se for uma URL (http:// ou https://), busca o HTML da página via Fetch HTTP
+    // 2. Se for uma URL (http:// ou https://), busca o HTML da página via Fetch HTTP com fallback inteligente
     if (inputStr.startsWith('http://') || inputStr.startsWith('https://')) {
-      try {
-        const response = await fetch(inputStr, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-          },
-          redirect: 'follow'
-        });
+      const fetchResult = await fetchPageWithFallback(inputStr);
+      workingUrl = fetchResult.workingUrl;
+      html = fetchResult.html;
 
-        if (response.ok) {
-          const html = await response.text();
-          const pageTorrents = extractAllTorrentsFromHtml(html);
-          pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
-        }
-      } catch (fetchErr) {
-        console.error('Erro ao acessar a URL via fetch:', fetchErr.message);
+      if (html) {
+        const pageTorrents = extractAllTorrentsFromHtml(html);
+        pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
       }
 
       // 3. Se nenhum magnet link foi encontrado via Fetch simples (ex: renderização por JS / protetores de link), usa Puppeteer como fallback
@@ -1224,9 +1279,9 @@ app.post('/api/deluge/add-url', async (req, res) => {
           });
           const page = await browser.newPage();
           await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-          await page.goto(inputStr, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+          await page.goto(workingUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
           await new Promise(r => setTimeout(r, 2000));
-          const renderedHtml = await page.content();
+          renderedHtml = await page.content();
           await browser.close();
 
           const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
@@ -1271,21 +1326,24 @@ app.post('/api/deluge/add-url', async (req, res) => {
     // Se o parâmetro monitor for true e for uma URL de página web, salva/atualiza sem duplicar
     if (req.body.monitor !== false && (inputStr.startsWith('http://') || inputStr.startsWith('https://'))) {
       try {
-        const normUrl = normalizePageUrl(inputStr);
+        const normUrl = normalizePageUrl(workingUrl);
+        const variants = getUrlVariants(normUrl);
         let cleanTitle = 'Página de Torrent';
         if (magnetsFoundMap.size > 0) {
           const firstTitle = Array.from(magnetsFoundMap.values())[0];
           if (firstTitle) cleanTitle = firstTitle.split(' - ')[0] || firstTitle;
         }
 
-        const existing = await MonitoredPage.findOne({ where: { url: normUrl } });
-        let htmlToExtractImg = null;
-        if (typeof html !== 'undefined') htmlToExtractImg = html;
-        else if (typeof renderedHtml !== 'undefined') htmlToExtractImg = renderedHtml;
-
+        const existing = await MonitoredPage.findOne({
+          where: {
+            url: { [Op.in]: variants }
+          }
+        });
+        const htmlToExtractImg = html || renderedHtml;
         const featuredImg = htmlToExtractImg ? extractFeaturedImage(htmlToExtractImg, normUrl) : null;
 
         if (existing) {
+          existing.url = normUrl; // Garante a URL funcional no banco
           existing.monitor = true;
           if (cleanTitle && cleanTitle !== 'Página de Torrent') existing.title = cleanTitle;
           if (featuredImg) existing.imageUrl = featuredImg;
@@ -1357,9 +1415,15 @@ app.post('/api/monitored-pages', async (req, res) => {
   }
   try {
     const normUrl = normalizePageUrl(url);
-    const existing = await MonitoredPage.findOne({ where: { url: normUrl } });
+    const variants = getUrlVariants(normUrl);
+    const existing = await MonitoredPage.findOne({
+      where: {
+        url: { [Op.in]: variants }
+      }
+    });
     let page;
     if (existing) {
+      existing.url = normUrl;
       existing.monitor = monitor !== false;
       if (title) existing.title = title;
       await existing.save();
@@ -1402,21 +1466,22 @@ app.post('/api/monitored-pages/:id/check', async (req, res) => {
     }
 
     const magnetsFoundMap = new Map();
-    try {
-      const response = await fetch(page.url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        },
-        redirect: 'follow'
-      });
-      if (response.ok) {
-        const html = await response.text();
-        const pageTorrents = extractAllTorrentsFromHtml(html);
-        pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
-        const pTitle = extractPageTitle(html);
-        if (pTitle) page.title = pTitle;
-      }
-    } catch (fErr) {}
+    const fetchResult = await fetchPageWithFallback(page.url);
+    if (fetchResult.workingUrl && fetchResult.workingUrl !== page.url) {
+      page.url = fetchResult.workingUrl;
+    }
+
+    let html = fetchResult.html;
+    let renderedHtml = null;
+
+    if (html) {
+      const pageTorrents = extractAllTorrentsFromHtml(html);
+      pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+      const pTitle = extractPageTitle(html);
+      if (pTitle) page.title = pTitle;
+      const pImg = extractFeaturedImage(html, page.url);
+      if (pImg) page.imageUrl = pImg;
+    }
 
     if (magnetsFoundMap.size === 0) {
       try {
@@ -1432,13 +1497,15 @@ app.post('/api/monitored-pages/:id/check', async (req, res) => {
         await pPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await pPage.goto(page.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
         await new Promise(r => setTimeout(r, 2000));
-        const renderedHtml = await pPage.content();
+        renderedHtml = await pPage.content();
         await browser.close();
 
         const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
         pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
         const pTitle = extractPageTitle(renderedHtml);
         if (pTitle) page.title = pTitle;
+        const pImg = extractFeaturedImage(renderedHtml, page.url);
+        if (pImg) page.imageUrl = pImg;
       } catch (pErr) {}
     }
 
@@ -1459,6 +1526,12 @@ app.post('/api/monitored-pages/:id/check', async (req, res) => {
           }
         }
       }
+    }
+
+    const foundCount = magnetsFoundMap.size;
+    if (addedCount > 0 || (foundCount > 0 && foundCount !== page.torrentsCount)) {
+      page.torrentsCount = foundCount;
+      page.lastContentChangedAt = new Date();
     }
 
     page.lastCheckedAt = new Date();
@@ -1636,6 +1709,25 @@ app.post('/api/storage/discover-path', async (req, res) => {
 });
 
 async function getDiskSpace(dirPath) {
+  if (!dirPath) return null;
+
+  // 1. Tenta nativamente com fs.statfsSync (ultra-rápido, sem chamadas de shell, preciso no Node 18+)
+  try {
+    if (typeof fs.statfsSync === 'function' && fs.existsSync(dirPath)) {
+      const stats = fs.statfsSync(dirPath);
+      const bsize = Number(stats.bsize);
+      const free = Number(stats.bavail !== undefined ? stats.bavail : stats.bfree) * bsize;
+      const total = Number(stats.blocks) * bsize;
+      const used = total - free;
+      if (total > 0 && !isNaN(free)) {
+        return { total, free, used };
+      }
+    }
+  } catch (err) {
+    console.error('[Storage] Erro ao obter espaço em disco via statfsSync:', err.message);
+  }
+
+  // 2. Fallback via ferramentas de SO caso statfsSync falhe
   const os = require('os');
   const isWin = os.platform() === 'win32';
   
@@ -1647,6 +1739,19 @@ async function getDiskSpace(dirPath) {
         drive = match[1];
       }
       
+      const wmicCmd = `wmic logicaldisk where DeviceID="${drive}" get FreeSpace,Size`;
+      const { stdout: wmicOut } = await execPromise(wmicCmd);
+      const wmicLines = wmicOut.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      if (wmicLines.length >= 2) {
+        const parts = wmicLines[1].split(/\s+/).map(Number);
+        if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+          const free = parts[0];
+          const total = parts[1];
+          const used = total - free;
+          return { total, free, used };
+        }
+      }
+
       const cmd = `powershell -Command "Get-PSDrive -Name '${drive[0]}' | Select-Object Used, Free"`;
       const { stdout } = await execPromise(cmd);
       
@@ -1657,19 +1762,6 @@ async function getDiskSpace(dirPath) {
           const used = parts[0];
           const free = parts[1];
           const total = used + free;
-          return { total, free, used };
-        }
-      }
-      
-      const wmicCmd = `wmic logicaldisk where DeviceID="${drive}" get FreeSpace,Size`;
-      const { stdout: wmicOut } = await execPromise(wmicCmd);
-      const wmicLines = wmicOut.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-      if (wmicLines.length >= 2) {
-        const parts = wmicLines[1].split(/\s+/).map(Number);
-        if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-          const free = parts[0];
-          const total = parts[1];
-          const used = total - free;
           return { total, free, used };
         }
       }
@@ -1689,7 +1781,7 @@ async function getDiskSpace(dirPath) {
       }
     }
   } catch (err) {
-    console.error('[Storage] Erro ao obter espaço em disco:', err.message);
+    console.error('[Storage] Erro ao obter espaço em disco via CLI fallback:', err.message);
   }
   
   return null;
@@ -1705,15 +1797,19 @@ function formatBytes(bytes, decimals = 2) {
 }
 
 function parseSizeBytes(sizeInput) {
-  if (!sizeInput) return 0;
-  if (typeof sizeInput === 'number') return sizeInput;
+  if (sizeInput === null || sizeInput === undefined) return 0;
+  if (typeof sizeInput === 'number') return isNaN(sizeInput) ? 0 : sizeInput;
 
   const str = String(sizeInput).trim();
+  if (!str) return 0;
 
-  // Se for um magnet link com parâmetro xl=
-  const xlMatch = str.match(/[?&]xl=(\d+)/i);
-  if (xlMatch) {
-    return parseInt(xlMatch[1], 10);
+  // Se for um magnet link: extrai parâmetro xl= se existir; caso contrário retorna 0
+  if (str.toLowerCase().startsWith('magnet:')) {
+    const xlMatch = str.match(/[?&]xl=(\d+)/i);
+    if (xlMatch) {
+      return parseInt(xlMatch[1], 10);
+    }
+    return 0;
   }
 
   // Se for apenas dígitos
@@ -1721,19 +1817,29 @@ function parseSizeBytes(sizeInput) {
     return parseInt(str, 10);
   }
 
-  // Converte string formatada como "1.5 GB", "700.5 MB", "4.2 GiB", "850 KB"
-  const match = str.match(/^([\d.,]+)\s*([a-zA-Z]+)?$/);
+  // Procura por número seguido de unidade (ex: "1.5 GB", "1,5 GB", "700 MB", "4.2 GiB", "850 KB")
+  const regex = /([\d.,]+)\s*(TB|TIB|GB|GIB|MB|MIB|KB|KIB|B)\b/i;
+  const match = str.match(regex);
   if (match) {
-    const numStr = match[1].replace(',', '.');
+    let numStr = match[1];
+    if (numStr.includes(',') && !numStr.includes('.')) {
+      numStr = numStr.replace(',', '.');
+    } else if (numStr.includes('.') && numStr.includes(',')) {
+      if (numStr.lastIndexOf(',') > numStr.lastIndexOf('.')) {
+        numStr = numStr.replace(/\./g, '').replace(',', '.');
+      } else {
+        numStr = numStr.replace(/,/g, '');
+      }
+    }
     const num = parseFloat(numStr);
     if (isNaN(num)) return 0;
-    
-    const unit = (match[2] || 'B').toUpperCase();
+
+    const unit = match[2].toUpperCase();
     if (unit.startsWith('TB') || unit.startsWith('TIB')) return Math.round(num * 1024 * 1024 * 1024 * 1024);
     if (unit.startsWith('GB') || unit.startsWith('GIB')) return Math.round(num * 1024 * 1024 * 1024);
     if (unit.startsWith('MB') || unit.startsWith('MIB')) return Math.round(num * 1024 * 1024);
     if (unit.startsWith('KB') || unit.startsWith('KIB')) return Math.round(num * 1024);
-    if (unit.startsWith('B')) return Math.round(num);
+    if (unit === 'B') return Math.round(num);
   }
 
   return 0;
@@ -1772,16 +1878,6 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
 
   let diskSpace = await getDiskSpace(downloadPath);
   if (!diskSpace || typeof diskSpace.free !== 'number') {
-    try {
-      if (typeof fs.statfsSync === 'function') {
-        const stats = fs.statfsSync(downloadPath);
-        const free = Number(stats.bavail || stats.bfree) * Number(stats.bsize);
-        diskSpace = { free };
-      }
-    } catch (e) {}
-  }
-
-  if (!diskSpace || typeof diskSpace.free !== 'number') {
     return { success: true, freed: 0 };
   }
 
@@ -1793,7 +1889,7 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
   const autoDeleteEnabled = setting ? (setting.value === 'true' || setting.value === '1') : true;
 
   if (!autoDeleteEnabled) {
-    const errorMsg = `Espaço em disco insuficiente. Necessário: ${formatBytes(requiredSpace)} (${size > 0 ? formatBytes(size) + ' + 10% + ' : ''}${minFreeGB} GB livres a manter), Disponível: ${formatBytes(diskSpace.free)}. A exclusão automática de arquivos antigos está desativada nas configurações.`;
+    const errorMsg = `Espaço em disco insuficiente. Necessário: ${formatBytes(requiredSpace)} (${parsed > 0 ? formatBytes(parsed) + ' + 10% + ' : ''}${minFreeGB} GB livres a manter), Disponível: ${formatBytes(diskSpace.free)}. A exclusão automática de arquivos antigos está desativada nas configurações.`;
     writeStorageLog(`[Alerta] ${errorMsg}`);
     return {
       success: false,
@@ -1801,7 +1897,7 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
     };
   }
 
-  writeStorageLog(`[Storage] Espaço em disco insuficiente (${formatBytes(diskSpace.free)} livre / ${formatBytes(requiredSpace)} necessário com reserva de ${minFreeGB} GB). Iniciando remoção automática dos arquivos mais antigos...`);
+  writeStorageLog(`[Storage] Espaço em disco insuficiente (${formatBytes(diskSpace.free)} livre / ${formatBytes(requiredSpace)} necessário com reserva de ${minFreeGB} GB). Iniciando remoção automática dos arquivos modificados há mais tempo na pasta de downloads (${downloadPath})...`);
 
   function getItemStats(dir) {
     const items = [];
@@ -1853,6 +1949,7 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
   }
 
   let items = getItemStats(downloadPath);
+  // Ordena estritamente pelos arquivos/pastas modificados há mais tempo (mtimeMs menor primeiro)
   items.sort((a, b) => a.mtimeMs - b.mtimeMs);
 
   let freedBytes = 0;
@@ -1864,7 +1961,7 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
     }
 
     try {
-      writeStorageLog(`[Storage] Apagando item antigo: ${item.name} (${formatBytes(item.size)}, modificado em ${new Date(item.mtimeMs).toLocaleString('pt-BR')})`);
+      writeStorageLog(`[Storage] Apagando item antigo no disco: ${item.name} (${formatBytes(item.size)}, modificado em ${new Date(item.mtimeMs).toLocaleString('pt-BR')})`);
       fs.rmSync(item.path, { recursive: true, force: true });
       freedBytes += item.size;
       currentFree += item.size;
@@ -1893,6 +1990,45 @@ async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
   }
 
   return { success: true, freed: freedBytes };
+}
+
+// Monitora um torrent adicionado no Deluge em segundo plano para obter seu tamanho total assim que os metadados forem resolvidos pelo daemon
+function monitorTorrentMetadataAndEnsureSpace(torrentId, maxAttempts = 15, intervalMs = 4000) {
+  if (!torrentId) return;
+
+  writeStorageLog(`[Storage] Iniciando monitoramento de metadados em segundo plano para o torrent (ID: ${torrentId})...`);
+  let attempts = 0;
+
+  const timer = setInterval(async () => {
+    attempts++;
+    try {
+      const client = await getDelugeClient().catch(() => null);
+      if (!client) {
+        if (attempts >= maxAttempts) clearInterval(timer);
+        return;
+      }
+
+      const statusMap = await client.getStatus().catch(() => null);
+      if (statusMap && statusMap[torrentId]) {
+        const torrent = statusMap[torrentId];
+        const size = torrent.total_size || 0;
+
+        if (size > 0) {
+          clearInterval(timer);
+          writeStorageLog(`[Storage] Metadados resolvidos para "${torrent.name || torrentId}" (${formatBytes(size)}). Verificando espaço em disco...`);
+          await ensureDiskSpaceForTorrent(size);
+          return;
+        }
+      }
+    } catch (err) {
+      console.error(`[Storage] Erro ao monitorar metadados do torrent ${torrentId}:`, err.message);
+    }
+
+    if (attempts >= maxAttempts) {
+      clearInterval(timer);
+      writeStorageLog(`[Storage] Monitoramento de metadados encerrado para o torrent ${torrentId} após ${maxAttempts} tentativas.`);
+    }
+  }, intervalMs);
 }
 
 // Rota para verificar e executar limpeza de disco simulando download (ex: 10 MB)
@@ -1946,12 +2082,14 @@ app.post('/api/storage/check-cleanup', async (req, res) => {
 // Rota para ler os logs do arquivo de limpeza
 app.get('/api/storage/logs', async (req, res) => {
   try {
-    const logFilePath = path.join(__dirname, 'storage_cleanup.log');
-    if (!fs.existsSync(logFilePath)) {
+    const logFilePath = path.join(__dirname, 'log', 'log.log');
+    const legacyPath = path.join(__dirname, 'storage_cleanup.log');
+    const targetPath = fs.existsSync(logFilePath) ? logFilePath : legacyPath;
+    if (!fs.existsSync(targetPath)) {
       return res.json({ success: true, logs: 'Nenhum log gravado ainda.' });
     }
-    const content = fs.readFileSync(logFilePath, 'utf8');
-    const lines = content.trim().split('\n').slice(-100).join('\n');
+    const content = fs.readFileSync(targetPath, 'utf8');
+    const lines = content.trim().split('\n').slice(-150).join('\n');
     res.json({ success: true, logs: lines });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -2153,30 +2291,27 @@ async function checkMonitoredPagesTask() {
         console.log(`[MonitoredPages] (${i + 1}/${pages.length}) Verificando URL (ID: ${page.id}): ${page.url}`);
         const magnetsFoundMap = new Map();
 
-        // 1. Tenta fetch HTTP
-        try {
-          const response = await fetch(page.url, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            },
-            redirect: 'follow'
-          });
-          if (response.ok) {
-            const html = await response.text();
-            const pageTorrents = extractAllTorrentsFromHtml(html);
-            pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
-            const pTitle = extractPageTitle(html);
-            if (pTitle && pTitle !== page.title) {
-              page.title = pTitle;
-            }
-            const pImg = extractFeaturedImage(html, page.url);
-            if (pImg) {
-              page.imageUrl = pImg;
-            }
+        // 1. Tenta fetch HTTP com fallback inteligente (trata com/sem barra no final)
+        const fetchResult = await fetchPageWithFallback(page.url);
+        if (fetchResult.workingUrl && fetchResult.workingUrl !== page.url) {
+          console.log(`[MonitoredPages] Atualizando URL da página ${page.id} para URL funcional: ${fetchResult.workingUrl}`);
+          page.url = fetchResult.workingUrl;
+        }
+
+        let html = fetchResult.html;
+        let renderedHtml = null;
+
+        if (html) {
+          const pageTorrents = extractAllTorrentsFromHtml(html);
+          pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+          const pTitle = extractPageTitle(html);
+          if (pTitle && pTitle !== page.title) {
+            page.title = pTitle;
           }
-        } catch (fErr) {
-          console.error(`[MonitoredPages] Erro no fetch de ${page.url}:`, fErr.message);
+          const pImg = extractFeaturedImage(html, page.url);
+          if (pImg) {
+            page.imageUrl = pImg;
+          }
         }
 
         // 2. Fallback Puppeteer se nada foi retornado via Fetch
