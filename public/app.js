@@ -4399,7 +4399,7 @@ function renderMonitoredPagesList(pages) {
     const safeTitle = escapeHtml(page.title || 'Página de Torrent');
     const safeUrl = escapeHtml(page.url);
 
-    let lastCheckedText = 'Nunca verificado';
+    let lastCheckedText = 'Aguardando 1ª checagem';
     if (page.lastCheckedAt) {
       const d = new Date(page.lastCheckedAt);
       lastCheckedText = d.toLocaleString('pt-BR');
@@ -4409,6 +4409,23 @@ function renderMonitoredPagesList(pages) {
     if (page.lastContentChangedAt) {
       const dChange = new Date(page.lastContentChangedAt);
       lastChangedText = dChange.toLocaleString('pt-BR');
+    }
+
+    const checkResult = page.lastCheckResult || (page.lastCheckedAt ? 'Verificação concluída' : 'Aguardando 1ª verificação');
+    const safeCheckResult = escapeHtml(checkResult);
+
+    let resultBadgeClass = 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 border border-slate-200/80 dark:border-slate-700/80';
+    let resultIcon = '<i class="ph-bold ph-check text-[11px] text-slate-500"></i>';
+
+    if (/novo\(s\)|adicionado/i.test(checkResult)) {
+      resultBadgeClass = 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25';
+      resultIcon = '<i class="ph-bold ph-sparkle text-[11px] text-emerald-500"></i>';
+    } else if (/erro|falha/i.test(checkResult)) {
+      resultBadgeClass = 'bg-red-500/10 text-red-650 dark:text-red-400 border border-red-500/25';
+      resultIcon = '<i class="ph-bold ph-warning-circle text-[11px] text-red-500"></i>';
+    } else if (/aguardando|pendente/i.test(checkResult)) {
+      resultBadgeClass = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/25';
+      resultIcon = '<i class="ph-bold ph-hourglass text-[11px] text-amber-500"></i>';
     }
 
     const isMonitored = page.monitor !== false;
@@ -4445,7 +4462,13 @@ function renderMonitoredPagesList(pages) {
                 <i class="ph-bold ph-link-simple shrink-0"></i> <span class="truncate">${safeUrl}</span>
               </a>
               <span class="shrink-0">• Novos torrents em: <strong class="text-slate-700 dark:text-slate-300 font-semibold">${lastChangedText}</strong></span>
-              <span class="shrink-0">• Checagem: ${lastCheckedText}</span>
+              <span class="shrink-0 flex items-center gap-1">• <i class="ph-bold ph-clock text-slate-400"></i> Última verificação: <strong class="text-slate-700 dark:text-slate-300 font-semibold">${lastCheckedText}</strong></span>
+            </div>
+            <div class="flex items-center gap-2 pt-0.5 flex-wrap">
+              <span class="text-[11px] text-slate-400 dark:text-slate-500 font-medium">Resultado:</span>
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-xs font-semibold ${resultBadgeClass}">
+                ${resultIcon} ${safeCheckResult}
+              </span>
             </div>
           </div>
         </div>

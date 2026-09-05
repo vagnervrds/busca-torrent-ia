@@ -1205,7 +1205,8 @@ async function fetchPageWithFallback(targetUrl) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       },
-      redirect: 'follow'
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15000)
     });
 
     // Se retornar 404, tenta a variação com ou sem barra no final
@@ -1217,7 +1218,8 @@ async function fetchPageWithFallback(targetUrl) {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
           },
-          redirect: 'follow'
+          redirect: 'follow',
+          signal: AbortSignal.timeout(15000)
         });
         if (altResponse.ok) {
           response = altResponse;
@@ -1342,6 +1344,10 @@ app.post('/api/deluge/add-url', async (req, res) => {
         const htmlToExtractImg = html || renderedHtml;
         const featuredImg = htmlToExtractImg ? extractFeaturedImage(htmlToExtractImg, normUrl) : null;
 
+        const initialResult = addedCount > 0
+          ? `${addedCount} novo(s) torrent(s) adicionado(s) (${magnetsFoundMap.size} na página)`
+          : (magnetsFoundMap.size > 0 ? `Nenhum novo torrent (${magnetsFoundMap.size} na página)` : 'Nenhum torrent encontrado na página');
+
         if (existing) {
           existing.url = normUrl; // Garante a URL funcional no banco
           existing.monitor = true;
@@ -1352,6 +1358,7 @@ app.post('/api/deluge/add-url', async (req, res) => {
             existing.lastContentChangedAt = new Date();
           }
           existing.lastCheckedAt = new Date();
+          existing.lastCheckResult = initialResult;
           await existing.save();
         } else {
           await MonitoredPage.create({
@@ -1361,7 +1368,8 @@ app.post('/api/deluge/add-url', async (req, res) => {
             monitor: true,
             torrentsCount: magnetsFoundMap.size,
             lastContentChangedAt: magnetsFoundMap.size > 0 ? new Date() : null,
-            lastCheckedAt: new Date()
+            lastCheckedAt: new Date(),
+            lastCheckResult: initialResult
           });
         }
       } catch (mErr) {
@@ -1433,7 +1441,8 @@ app.post('/api/monitored-pages', async (req, res) => {
         url: normUrl,
         title: title || 'Página de Torrent',
         monitor: monitor !== false,
-        lastCheckedAt: new Date()
+        lastCheckedAt: null,
+        lastCheckResult: 'Aguardando 1ª verificação'
       });
     }
     res.json({ success: true, page, isDuplicate: !!existing });
@@ -1457,68 +1466,90 @@ app.put('/api/monitored-pages/:id/toggle', async (req, res) => {
   }
 });
 
-// Executar verificação manual imediata de 1 página
-app.post('/api/monitored-pages/:id/check', async (req, res) => {
-  try {
-    const page = await MonitoredPage.findByPk(req.params.id);
-    if (!page) {
-      return res.status(404).json({ success: false, error: 'Página não encontrada.' });
-    }
+// Função modular e leve para verificar uma única página monitorada
+async function verifySingleMonitoredPage(page, client = null) {
+  let browser = null;
+  let addedCount = 0;
+  let existingCount = 0;
+  let totalFound = 0;
+  let statusMessage = '';
 
+  try {
+    console.log(`[MonitoredPages] Verificando página ID ${page.id}: ${page.url}`);
     const magnetsFoundMap = new Map();
+
+    // 1. Tenta fetch HTTP com fallback inteligente (trata com/sem barra no final) - ultra leve
     const fetchResult = await fetchPageWithFallback(page.url);
     if (fetchResult.workingUrl && fetchResult.workingUrl !== page.url) {
       page.url = fetchResult.workingUrl;
     }
 
     let html = fetchResult.html;
-    let renderedHtml = null;
 
     if (html) {
       const pageTorrents = extractAllTorrentsFromHtml(html);
       pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
       const pTitle = extractPageTitle(html);
-      if (pTitle) page.title = pTitle;
+      if (pTitle && (!page.title || page.title === 'Página sem título' || page.title === 'Página de Torrent')) {
+        page.title = pTitle;
+      }
       const pImg = extractFeaturedImage(html, page.url);
       if (pImg) page.imageUrl = pImg;
     }
 
+    // 2. Fallback Puppeteer somente se nada foi retornado via Fetch rápido
     if (magnetsFoundMap.size === 0) {
       try {
         const puppeteer = require('puppeteer-extra');
         const StealthPlugin = require('puppeteer-extra-plugin-stealth');
         puppeteer.use(StealthPlugin());
 
-        const browser = await puppeteer.launch({
+        browser = await puppeteer.launch({
           headless: 'new',
-          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--no-zygote',
+            '--single-process'
+          ]
         });
         const pPage = await browser.newPage();
         await pPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await pPage.goto(page.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
         await new Promise(r => setTimeout(r, 2000));
-        renderedHtml = await pPage.content();
-        await browser.close();
+        const renderedHtml = await pPage.content();
 
         const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
         pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
         const pTitle = extractPageTitle(renderedHtml);
-        if (pTitle) page.title = pTitle;
+        if (pTitle && (!page.title || page.title === 'Página sem título' || page.title === 'Página de Torrent')) {
+          page.title = pTitle;
+        }
         const pImg = extractFeaturedImage(renderedHtml, page.url);
         if (pImg) page.imageUrl = pImg;
-      } catch (pErr) {}
+      } catch (pErr) {
+        console.error(`[MonitoredPages] Falha Puppeteer para ${page.url}:`, pErr.message);
+      } finally {
+        if (browser) {
+          await browser.close().catch(() => {});
+          browser = null;
+        }
+      }
     }
 
-    const client = await getDelugeClient().catch(() => null);
-    let addedCount = 0;
-    let existingCount = 0;
+    totalFound = magnetsFoundMap.size;
 
-    if (client && magnetsFoundMap.size > 0) {
+    // 3. Conexão ao Deluge e envio dos magnets
+    const delugeClient = client || await getDelugeClient().catch(() => null);
+    if (delugeClient && totalFound > 0) {
       for (const [mag] of magnetsFoundMap.entries()) {
         try {
           const spaceCheck = await ensureDiskSpaceForTorrent(mag);
           if (!spaceCheck.success) continue;
-          await client.addMagnet(mag);
+          await delugeClient.addMagnet(mag);
           addedCount++;
         } catch (addErr) {
           if (addErr.message && addErr.message.includes('already in session')) {
@@ -1528,22 +1559,70 @@ app.post('/api/monitored-pages/:id/check', async (req, res) => {
       }
     }
 
-    const foundCount = magnetsFoundMap.size;
-    if (addedCount > 0 || (foundCount > 0 && foundCount !== page.torrentsCount)) {
-      page.torrentsCount = foundCount;
+    // 4. Determina mensagem amigável e status do resultado
+    if (addedCount > 0) {
+      statusMessage = `${addedCount} novo(s) torrent(s) adicionado(s) (${totalFound} na página)`;
+      page.torrentsCount = totalFound;
       page.lastContentChangedAt = new Date();
+    } else if (totalFound > 0) {
+      statusMessage = `Nenhum novo torrent (${totalFound} na página)`;
+      page.torrentsCount = totalFound;
+    } else {
+      statusMessage = 'Nenhum torrent encontrado na página';
     }
 
     page.lastCheckedAt = new Date();
+    page.lastCheckResult = statusMessage;
     await page.save();
+
+    return {
+      success: true,
+      page,
+      addedCount,
+      existingCount,
+      totalFound,
+      statusMessage
+    };
+  } catch (err) {
+    console.error(`[MonitoredPages] Erro ao verificar página ${page.id} (${page.url}):`, err.message);
+    page.lastCheckedAt = new Date();
+    page.lastCheckResult = `Erro: ${err.message}`;
+    await page.save().catch(() => {});
+    return {
+      success: false,
+      page,
+      addedCount: 0,
+      existingCount: 0,
+      totalFound: 0,
+      error: err.message,
+      statusMessage: `Erro: ${err.message}`
+    };
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+}
+
+// Executar verificação manual imediata de 1 página
+app.post('/api/monitored-pages/:id/check', async (req, res) => {
+  try {
+    const page = await MonitoredPage.findByPk(req.params.id);
+    if (!page) {
+      return res.status(404).json({ success: false, error: 'Página não encontrada.' });
+    }
+
+    const result = await verifySingleMonitoredPage(page);
     await invalidateCache('deluge_torrents');
 
     res.json({
-      success: true,
-      page,
-      totalFound: magnetsFoundMap.size,
-      addedCount,
-      existingCount
+      success: result.success,
+      page: result.page,
+      totalFound: result.totalFound,
+      addedCount: result.addedCount,
+      existingCount: result.existingCount,
+      lastCheckResult: result.statusMessage,
+      error: result.error
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -2262,11 +2341,10 @@ app.delete('/api/storage/delete', async (req, res) => {
 });
 
 
-// Função para verificar sequencialmente todas as páginas monitoradas ativas no banco de dados com pausa entre URLs
+// Função para verificar sequencialmente todas as páginas monitoradas ativas no banco de dados com pausa entre URLs (usada no botão manual "Verificar Todas")
 async function checkMonitoredPagesTask() {
-  console.log('[MonitoredPages] Iniciando verificação sequencial de páginas monitoradas...');
+  console.log('[MonitoredPages] Iniciando verificação sequencial manual de todas as páginas monitoradas...');
   try {
-    // Ordena pela data em que teve novos torrents/alteração de conteúdo por último (lastContentChangedAt DESC)
     const pages = await MonitoredPage.findAll({
       where: { monitor: true },
       order: [
@@ -2280,111 +2358,95 @@ async function checkMonitoredPagesTask() {
       return { checkedCount: 0, addedTotal: 0 };
     }
 
-    console.log(`[MonitoredPages] Encontradas ${pages.length} páginas para verificação. Processando com pausa entre URLs...`);
+    console.log(`[MonitoredPages] Encontradas ${pages.length} páginas para verificação manual. Processando com pausa entre URLs...`);
 
     let addedTotal = 0;
     const client = await getDelugeClient().catch(() => null);
 
     for (let i = 0; i < pages.length; i++) {
       const page = pages[i];
-      try {
-        console.log(`[MonitoredPages] (${i + 1}/${pages.length}) Verificando URL (ID: ${page.id}): ${page.url}`);
-        const magnetsFoundMap = new Map();
+      console.log(`[MonitoredPages] (${i + 1}/${pages.length}) Verificando URL (ID: ${page.id}): ${page.url}`);
+      const res = await verifySingleMonitoredPage(page, client);
+      if (res.addedCount) addedTotal += res.addedCount;
 
-        // 1. Tenta fetch HTTP com fallback inteligente (trata com/sem barra no final)
-        const fetchResult = await fetchPageWithFallback(page.url);
-        if (fetchResult.workingUrl && fetchResult.workingUrl !== page.url) {
-          console.log(`[MonitoredPages] Atualizando URL da página ${page.id} para URL funcional: ${fetchResult.workingUrl}`);
-          page.url = fetchResult.workingUrl;
-        }
-
-        let html = fetchResult.html;
-        let renderedHtml = null;
-
-        if (html) {
-          const pageTorrents = extractAllTorrentsFromHtml(html);
-          pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
-          const pTitle = extractPageTitle(html);
-          if (pTitle && pTitle !== page.title) {
-            page.title = pTitle;
-          }
-          const pImg = extractFeaturedImage(html, page.url);
-          if (pImg) {
-            page.imageUrl = pImg;
-          }
-        }
-
-        // 2. Fallback Puppeteer se nada foi retornado via Fetch
-        if (magnetsFoundMap.size === 0) {
-          try {
-            const puppeteer = require('puppeteer-extra');
-            const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-            puppeteer.use(StealthPlugin());
-
-            const browser = await puppeteer.launch({
-              headless: 'new',
-              args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-            });
-            const pPage = await browser.newPage();
-            await pPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-            await pPage.goto(page.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-            await new Promise(r => setTimeout(r, 2000));
-            const renderedHtml = await pPage.content();
-            await browser.close();
-
-            const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
-            pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
-            const pTitle = extractPageTitle(renderedHtml);
-            if (pTitle) page.title = pTitle;
-            const pImg = extractFeaturedImage(renderedHtml, page.url);
-            if (pImg) page.imageUrl = pImg;
-          } catch (pErr) {
-            console.error(`[MonitoredPages] Erro Puppeteer em ${page.url}:`, pErr.message);
-          }
-        }
-
-        // 3. Adiciona torrents no Deluge e verifica alteração na contagem
-        let pageAddedCount = 0;
-        if (client && magnetsFoundMap.size > 0) {
-          for (const [mag] of magnetsFoundMap.entries()) {
-            try {
-              const spaceCheck = await ensureDiskSpaceForTorrent(mag);
-              if (!spaceCheck.success) continue;
-              await client.addMagnet(mag);
-              pageAddedCount++;
-              addedTotal++;
-            } catch (aErr) {
-              // Torrent já existente ou erro silencioso
-            }
-          }
-        }
-
-        const foundCount = magnetsFoundMap.size;
-        if (pageAddedCount > 0 || (foundCount > 0 && foundCount !== page.torrentsCount)) {
-          page.torrentsCount = foundCount;
-          page.lastContentChangedAt = new Date();
-          console.log(`[MonitoredPages] Alteração de torrents em ${page.url}! Total: ${foundCount}, Novos adicionados: ${pageAddedCount}`);
-        }
-
-        page.lastCheckedAt = new Date();
-        await page.save();
-
-        // Pausa sequencial de 3 segundos entre URLs
-        if (i < pages.length - 1) {
-          console.log('[MonitoredPages] Pausa de 3 segundos antes da próxima URL...');
-          await new Promise(r => setTimeout(r, 3000));
-        }
-      } catch (pErr) {
-        console.error(`[MonitoredPages] Erro ao verificar página ${page.id}:`, pErr.message);
+      // Pausa sequencial de 3 segundos entre URLs
+      if (i < pages.length - 1) {
+        console.log('[MonitoredPages] Pausa de 3 segundos antes da próxima URL...');
+        await new Promise(r => setTimeout(r, 3000));
       }
     }
 
-    await invalidateCache('deluge_torrents');
-    console.log(`[MonitoredPages] Verificação sequencial concluída. Páginas: ${pages.length}, Torrents adicionados: ${addedTotal}`);
+    if (addedTotal > 0) {
+      await invalidateCache('deluge_torrents');
+    }
+    console.log(`[MonitoredPages] Verificação manual concluída. Páginas: ${pages.length}, Torrents adicionados: ${addedTotal}`);
     return { checkedCount: pages.length, addedTotal };
   } catch (err) {
-    console.error('[MonitoredPages] Erro ao executar tarefa de monitoramento:', err.message);
+    console.error('[MonitoredPages] Erro ao executar tarefa manual de monitoramento:', err.message);
     return { error: err.message };
+  }
+}
+
+// =========================================================================
+// WORKER LEVE DE VERIFICAÇÃO PERIÓDICA DE PÁGINAS MONITORADAS (CICLO DE 12H)
+// Executado a cada 5 minutos, verifica páginas com mais de 12 horas sem checagem
+// =========================================================================
+let isMonitoredWorkerRunning = false;
+
+async function runMonitoredPagesWorker() {
+  if (isMonitoredWorkerRunning) {
+    console.log('[MonitoredPagesWorker] Ciclo anterior ainda em andamento. Ignorando este tick...');
+    return;
+  }
+
+  isMonitoredWorkerRunning = true;
+  try {
+    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
+    const { Op } = require('sequelize');
+
+    // Busca apenas páginas com monitoramento ativo que nunca foram checadas ou cuja última checagem foi há mais de 12 horas
+    const pendingPages = await MonitoredPage.findAll({
+      where: {
+        monitor: true,
+        [Op.or]: [
+          { lastCheckedAt: null },
+          { lastCheckedAt: { [Op.lte]: twelveHoursAgo } }
+        ]
+      },
+      order: [
+        [sequelize.fn('COALESCE', sequelize.col('lastCheckedAt'), new Date(0)), 'ASC']
+      ]
+    });
+
+    if (pendingPages.length === 0) {
+      // Muito leve: encerra imediatamente sem gastar processamento nem memória
+      return;
+    }
+
+    console.log(`[MonitoredPagesWorker] Encontrada(s) ${pendingPages.length} página(s) pendente(s) (>12h). Iniciando verificação leve em segundo plano...`);
+    const client = await getDelugeClient().catch(() => null);
+    let addedTotal = 0;
+
+    for (let i = 0; i < pendingPages.length; i++) {
+      const page = pendingPages[i];
+      console.log(`[MonitoredPagesWorker] (${i + 1}/${pendingPages.length}) Checando ID ${page.id}: ${page.url}`);
+      const res = await verifySingleMonitoredPage(page, client);
+      if (res.addedCount) addedTotal += res.addedCount;
+
+      // Pausa leve de 5 segundos entre as páginas para não sobrecarregar CPU e memória no hardware limitado
+      if (i < pendingPages.length - 1) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+
+    if (addedTotal > 0) {
+      await invalidateCache('deluge_torrents');
+    }
+    console.log(`[MonitoredPagesWorker] Ciclo concluído. ${pendingPages.length} página(s) checada(s), ${addedTotal} novo(s) torrent(s) adicionado(s).`);
+  } catch (err) {
+    console.error('[MonitoredPagesWorker] Erro durante o ciclo do worker:', err.message);
+  } finally {
+    isMonitoredWorkerRunning = false;
   }
 }
 
@@ -2492,19 +2554,23 @@ liberarPortaServidor().catch(err => {
       });
     }, 3000); // 3 segundos após boot
 
-    // Executa a verificação inicial das páginas monitoradas ao iniciar o servidor
-    setTimeout(() => {
-      checkMonitoredPagesTask().catch(err => {
-        console.error("Erro na verificação inicial das páginas monitoradas:", err.message);
-      });
-    }, 10000); // 10 segundos após o boot
+    // Inicia o worker leve de páginas monitoradas com timer inicial de 5 minutos (para não travar a inicialização)
+    // A partir daí, a cada 5 minutos verifica no banco se há páginas que ultrapassaram o prazo de 12 horas
+    const INITIAL_MONITOR_DELAY_MS = 5 * 60 * 1000; // 5 minutos
+    const MONITOR_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos
 
-    // Agenda a verificação periódica das páginas monitoradas a cada 12 horas
-    setInterval(() => {
-      checkMonitoredPagesTask().catch(err => {
-        console.error("Erro no ciclo de 12h das páginas monitoradas:", err.message);
+    console.log('[Startup] Worker de páginas monitoradas agendado: primeiro disparo em 5 minutos, repetição a cada 5 minutos.');
+    setTimeout(() => {
+      runMonitoredPagesWorker().catch(err => {
+        console.error('[MonitoredPagesWorker] Erro no disparo inicial:', err.message);
       });
-    }, 12 * 60 * 60 * 1000);
+
+      setInterval(() => {
+        runMonitoredPagesWorker().catch(err => {
+          console.error('[MonitoredPagesWorker] Erro no ciclo periódico:', err.message);
+        });
+      }, MONITOR_CHECK_INTERVAL_MS);
+    }, INITIAL_MONITOR_DELAY_MS);
 
     function obterIpLocal() {
       const { networkInterfaces } = require('os');

@@ -253,6 +253,10 @@ const MonitoredPage = sequelize.define('MonitoredPage', {
   lastCheckedAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  lastCheckResult: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 });
 
@@ -339,6 +343,15 @@ async function initDatabase() {
   try {
     await sequelize.getQueryInterface().addColumn('MonitoredPages', 'imageUrl', {
       type: DataTypes.TEXT,
+      allowNull: true
+    });
+  } catch (e) {
+    // Coluna já existe
+  }
+
+  try {
+    await sequelize.getQueryInterface().addColumn('MonitoredPages', 'lastCheckResult', {
+      type: DataTypes.STRING,
       allowNull: true
     });
   } catch (e) {
