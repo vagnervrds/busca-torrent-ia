@@ -2495,42 +2495,42 @@ liberarPortaServidor().catch(err => {
   console.error("[Startup] Erro ao liberar porta do servidor:", err.message);
 }).finally(() => {
   initDatabase().then(async () => {
-    // Reseta buscas que ficaram travadas no estado "searching" devido a quedas/reinicializações
+    // Reseta buscas que ficaram travadas no estado "searching" para "pending"
     try {
       const { Search } = require('./database');
       const [affectedCount] = await Search.update(
-        { status: 'stopped' },
+        { status: 'pending' },
         { where: { status: 'searching' } }
       );
       if (affectedCount > 0) {
-        console.log(`[Startup] Redefinidas ${affectedCount} buscas travadas em "searching" para "stopped".`);
+        console.log(`[Startup] Redefinidas ${affectedCount} buscas travadas em "searching" para "pending" para retomada limpa.`);
       }
     } catch (err) {
       console.error("Erro ao limpar buscas travadas na inicialização:", err);
     }
 
-    // Agenda reinício automático das buscas não concluídas após 60 segundos
+    // Agenda reinício automático das buscas pendentes após 60 segundos
     setTimeout(async () => {
       try {
-        console.log('[Startup] Iniciando retomada automática de buscas...');
+        console.log('[Startup] Iniciando retomada automática de buscas pendentes...');
         const { Search } = require('./database');
         const { enqueueSearch } = require('./agent');
-        const { Op } = require('sequelize');
 
         const searchesToResume = await Search.findAll({
           where: {
-            status: { [Op.ne]: 'completed' }
+            status: 'pending'
           },
-          order: [['id', 'DESC']]
+          order: [['id', 'DESC']],
+          limit: 3
         });
 
         if (searchesToResume.length > 0) {
-          console.log(`[Startup] Encontradas ${searchesToResume.length} buscas não concluídas. Enfileirando por ordem de recência...`);
+          console.log(`[Startup] Encontradas ${searchesToResume.length} buscas pendentes para retomar.`);
           for (const search of searchesToResume) {
             enqueueSearch(search.id, true);
           }
         } else {
-          console.log('[Startup] Nenhuma busca pendente ou não concluída para reiniciar.');
+          console.log('[Startup] Nenhuma busca pendente para reiniciar.');
         }
       } catch (err) {
         console.error('[Startup] Erro ao retomar buscas pendentes:', err.message);
@@ -2586,7 +2586,7 @@ liberarPortaServidor().catch(err => {
       return '127.0.0.1';
     }
 
-    app.listen(PORT, () => {
+    const serverInstance = app.listen(PORT, () => {
       const ipLocal = obterIpLocal();
       console.log(`===================================================`);
       console.log(` Servidor rodando em: http://localhost:${PORT}`);
@@ -2594,6 +2594,60 @@ liberarPortaServidor().catch(err => {
       console.log(` Banco de dados SQLite conectado com sucesso.`);
       console.log(`===================================================`);
     });
+
+    serverInstance.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`[Fatal] Porta ${PORT} já está ocupada por outro processo.`);
+      } else {
+        console.error(`[Fatal] Erro no servidor HTTP:`, err.message);
+      }
+      process.exit(1);
+    });
+
+    // Encerramento gracioso para SIGTERM e SIGINT (systemd stop / restart)
+    let isShuttingDown = false;
+    const gracefulShutdown = async (signal) => {
+      if (isShuttingDown) return;
+      isShuttingDown = true;
+      console.log(`[Shutdown] Sinal ${signal} recebido. Encerrando servidor graciosamente...`);
+
+      const forceTimer = setTimeout(() => {
+        console.error('[Shutdown] Limite de 8s atingido para desligamento gracioso. Forçando encerramento.');
+        process.exit(1);
+      }, 8000);
+
+      try {
+        if (serverInstance) {
+          await new Promise(resolve => serverInstance.close(resolve));
+          console.log('[Shutdown] Servidor HTTP fechado com sucesso.');
+        }
+
+        try {
+          const { stopAllSearchAgents } = require('./agent');
+          if (typeof stopAllSearchAgents === 'function') {
+            await stopAllSearchAgents();
+            console.log('[Shutdown] Agentes de busca encerrados.');
+          }
+        } catch (e) {
+          console.error('[Shutdown] Erro ao parar agentes:', e.message);
+        }
+
+        try {
+          await sequelize.close();
+          console.log('[Shutdown] Conexão SQLite encerrada.');
+        } catch (e) {}
+
+        clearTimeout(forceTimer);
+        console.log('[Shutdown] Finalização limpa concluída.');
+        process.exit(0);
+      } catch (err) {
+        console.error('[Shutdown] Erro ao finalizar graciosamente:', err.message);
+        process.exit(1);
+      }
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   }).catch(err => {
     console.error("Falha ao inicializar o banco de dados:", err);
   });

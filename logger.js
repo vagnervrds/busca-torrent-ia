@@ -191,6 +191,19 @@ setInterval(() => {
   cleanPM2Logs();
 }, 60 * 60 * 1000);
 
+// Captura exceções não tratadas para evitar crashes silenciosos e registrar stack trace
+process.on('uncaughtException', (err) => {
+  const stack = err && err.stack ? err.stack : String(err);
+  writeDirectLog(`[FATAL] Exceção não tratada capturada (uncaughtException): ${stack}`, 'FATAL');
+  originalError('[FATAL] Exceção não tratada capturada (uncaughtException):', stack);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const stack = reason && reason.stack ? reason.stack : String(reason);
+  writeDirectLog(`[ERROR] Rejeição de Promise não tratada (unhandledRejection): ${stack}`, 'ERROR');
+  originalError('[ERROR] Rejeição de Promise não tratada (unhandledRejection):', stack);
+});
+
 module.exports = {
   LOG_DIR,
   CURRENT_LOG_FILE,

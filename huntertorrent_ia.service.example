@@ -1,0 +1,32 @@
+[Unit]
+Description=HunterTorrent IA Service
+After=network.target
+# Desativa o limite de tentativas de reinicializacao para que o systemd NUNCA desista de reiniciar o servico
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=seu_usuario
+WorkingDirectory=/caminho/para/o/projeto/huntertorrent_ia
+ExecStart=/home/seu_usuario/.nvm/versions/node/v24.18.0/bin/node server.js
+# Reinicia sempre em caso de falha, crash ou saida inesperada
+Restart=always
+# Aguarda 5 segundos antes de reiniciar para evitar loops agressivos de CPU
+RestartSec=5
+# Garante que processos filhos (como instancias do Chromium/Puppeteer) sejam encerrados no stop/restart
+KillMode=mixed
+TimeoutStopSec=15
+# Protecao contra esgotamento de memoria (evita travar o servidor inteiro se o Chromium/Node consumir muita RAM)
+MemoryMax=1500M
+
+# Variaveis de ambiente
+Environment=PATH=/home/seu_usuario/.nvm/versions/node/v24.18.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+Environment=PORT=4182
+
+# Logs direcionados para o journalctl do systemd
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
