@@ -1313,6 +1313,9 @@ app.post('/api/deluge/add-url', async (req, res) => {
         }
         const torrentId = await client.addMagnet(mag);
         results.push({ title, magnet: mag, success: true, torrentId, alreadyExists: false });
+        if (torrentId) {
+          monitorTorrentMetadataAndEnsureSpace(torrentId);
+        }
       } catch (addErr) {
         if (addErr.message && addErr.message.includes('already in session')) {
           results.push({ title, magnet: mag, success: true, alreadyExists: true });
@@ -1938,141 +1941,169 @@ function writeStorageLog(message) {
   }
 }
 
+let isStorageCleaningActive = false;
+let storageGuardianTimer = null;
+
 async function ensureDiskSpaceForTorrent(torrentSizeInBytes) {
-  const parsed = parseSizeBytes(torrentSizeInBytes);
-  const size = (parsed && parsed > 0) ? parsed : 0;
-
-  // Consulta limite mínimo de espaço livre em disco a ser mantido na unidade (padrão 4GB)
-  const minSetting = await SystemSetting.findOne({ where: { key: 'minFreeSpaceGB' } });
-  const minFreeGB = minSetting ? (parseFloat(minSetting.value) || 4) : 4;
-  const minFreeBytes = Math.round(minFreeGB * 1024 * 1024 * 1024);
-
-  // Tamanho necessário = (tamanho do torrent + 10%) + espaço mínimo livre reservado no disco
-  const requiredSpace = Math.ceil(size * 1.10) + minFreeBytes;
-
-  const downloadPath = await discoverDelugePath();
-  if (!downloadPath || !fs.existsSync(downloadPath)) {
-    return { success: true, freed: 0 };
+  if (isStorageCleaningActive) {
+    return { success: true, freed: 0, inProgress: true };
   }
+  isStorageCleaningActive = true;
 
-  let diskSpace = await getDiskSpace(downloadPath);
-  if (!diskSpace || typeof diskSpace.free !== 'number') {
-    return { success: true, freed: 0 };
-  }
+  try {
+    const parsed = parseSizeBytes(torrentSizeInBytes);
+    const size = (parsed && parsed > 0) ? parsed : 0;
 
-  if (diskSpace.free >= requiredSpace) {
-    return { success: true, freed: 0 };
-  }
+    // Consulta limite mínimo de espaço livre em disco a ser mantido na unidade (padrão 4GB)
+    const minSetting = await SystemSetting.findOne({ where: { key: 'minFreeSpaceGB' } }).catch(() => null);
+    const minFreeGB = minSetting ? (parseFloat(minSetting.value) || 4) : 4;
+    const minFreeBytes = Math.round(minFreeGB * 1024 * 1024 * 1024);
 
-  const setting = await SystemSetting.findOne({ where: { key: 'autoDeleteOldFiles' } });
-  const autoDeleteEnabled = setting ? (setting.value === 'true' || setting.value === '1') : true;
+    // Tamanho necessário = (tamanho do torrent + 10%) + espaço mínimo livre reservado no disco
+    const requiredSpace = Math.ceil(size * 1.10) + minFreeBytes;
 
-  if (!autoDeleteEnabled) {
-    const errorMsg = `Espaço em disco insuficiente. Necessário: ${formatBytes(requiredSpace)} (${parsed > 0 ? formatBytes(parsed) + ' + 10% + ' : ''}${minFreeGB} GB livres a manter), Disponível: ${formatBytes(diskSpace.free)}. A exclusão automática de arquivos antigos está desativada nas configurações.`;
-    writeStorageLog(`[Alerta] ${errorMsg}`);
-    return {
-      success: false,
-      error: errorMsg
-    };
-  }
-
-  writeStorageLog(`[Storage] Espaço em disco insuficiente (${formatBytes(diskSpace.free)} livre / ${formatBytes(requiredSpace)} necessário com reserva de ${minFreeGB} GB). Iniciando remoção automática dos arquivos modificados há mais tempo na pasta de downloads (${downloadPath})...`);
-
-  function getItemStats(dir) {
-    const items = [];
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        try {
-          const stat = fs.statSync(fullPath);
-          let itemSize = stat.size;
-          let mtimeMs = stat.mtimeMs;
-
-          if (entry.isDirectory()) {
-            itemSize = getFolderSize(fullPath);
-          }
-
-          items.push({
-            path: fullPath,
-            name: entry.name,
-            isDirectory: entry.isDirectory(),
-            mtimeMs: mtimeMs,
-            size: itemSize
-          });
-        } catch (stErr) {}
-      }
-    } catch (rdErr) {
-      console.error(`[Storage] Erro ao ler diretório de downloads (${dir}):`, rdErr.message);
+    const downloadPath = await discoverDelugePath();
+    if (!downloadPath || !fs.existsSync(downloadPath)) {
+      return { success: true, freed: 0 };
     }
-    return items;
-  }
 
-  function getFolderSize(dir) {
-    let folderSize = 0;
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        try {
-          if (entry.isDirectory()) {
-            folderSize += getFolderSize(fullPath);
-          } else {
+    let diskSpace = await getDiskSpace(downloadPath);
+    if (!diskSpace || typeof diskSpace.free !== 'number') {
+      return { success: true, freed: 0 };
+    }
+
+    if (diskSpace.free >= requiredSpace) {
+      return { success: true, freed: 0 };
+    }
+
+    const setting = await SystemSetting.findOne({ where: { key: 'autoDeleteOldFiles' } }).catch(() => null);
+    const autoDeleteEnabled = setting ? (setting.value === 'true' || setting.value === '1') : true;
+
+    if (!autoDeleteEnabled) {
+      const errorMsg = `Espaço em disco insuficiente. Necessário: ${formatBytes(requiredSpace)} (${parsed > 0 ? formatBytes(parsed) + ' + 10% + ' : ''}${minFreeGB} GB livres a manter), Disponível: ${formatBytes(diskSpace.free)}. A exclusão automática de arquivos antigos está desativada nas configurações.`;
+      writeStorageLog(`[Alerta] ${errorMsg}`);
+      return {
+        success: false,
+        error: errorMsg
+      };
+    }
+
+    writeStorageLog(`[Storage] Espaço em disco insuficiente (${formatBytes(diskSpace.free)} livre / ${formatBytes(requiredSpace)} necessário com reserva de ${minFreeGB} GB). Iniciando remoção automática dos arquivos modificados há mais tempo na pasta de downloads (${downloadPath})...`);
+
+    // Leitura ultra-leve apenas do primeiro nível (zero varredura recursiva para não travar HD/CPU fracos)
+    function getItemStatsLight(dir) {
+      const items = [];
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          try {
             const stat = fs.statSync(fullPath);
-            folderSize += stat.size;
-          }
-        } catch (e) {}
+            items.push({
+              path: fullPath,
+              name: entry.name,
+              isDirectory: entry.isDirectory(),
+              mtimeMs: stat.mtimeMs,
+              size: stat.size
+            });
+          } catch (stErr) {}
+        }
+      } catch (rdErr) {
+        console.error(`[Storage] Erro ao ler diretório de downloads (${dir}):`, rdErr.message);
       }
-    } catch (e) {}
-    return folderSize;
-  }
-
-  let items = getItemStats(downloadPath);
-  // Ordena estritamente pelos arquivos/pastas modificados há mais tempo (mtimeMs menor primeiro)
-  items.sort((a, b) => a.mtimeMs - b.mtimeMs);
-
-  let freedBytes = 0;
-  let currentFree = diskSpace.free;
-
-  for (const item of items) {
-    if (currentFree >= requiredSpace) {
-      break;
+      return items;
     }
 
+    let items = getItemStatsLight(downloadPath);
+    // Ordena estritamente pelos arquivos/pastas modificados há mais tempo (mtimeMs menor primeiro)
+    items.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+    // Evita apagar arquivos recém-criados ou em gravação ativa nos últimos 15 minutos, caso haja opções mais antigas
+    const nowMs = Date.now();
+    const fifteenMinMs = 15 * 60 * 1000;
+    const oldItems = items.filter(it => (nowMs - it.mtimeMs) > fifteenMinMs);
+    const candidateItems = oldItems.length > 0 ? oldItems : items;
+
+    let freedBytes = 0;
+    let currentFree = diskSpace.free;
+
+    for (const item of candidateItems) {
+      if (currentFree >= requiredSpace) {
+        break;
+      }
+
+      try {
+        const freeBefore = currentFree;
+        writeStorageLog(`[Storage] Apagando item antigo no disco: ${item.name} (modificado em ${new Date(item.mtimeMs).toLocaleString('pt-BR')})`);
+        fs.rmSync(item.path, { recursive: true, force: true });
+
+        // Consulta espaço real liberado pelo SO via syscall instantânea
+        const updatedDisk = await getDiskSpace(downloadPath);
+        if (updatedDisk && typeof updatedDisk.free === 'number') {
+          const diff = updatedDisk.free - freeBefore;
+          if (diff > 0) freedBytes += diff;
+          currentFree = updatedDisk.free;
+        }
+      } catch (rmErr) {
+        writeStorageLog(`[Storage] Erro ao apagar ${item.path}: ${rmErr.message}`);
+      }
+    }
+
+    if (freedBytes > 0) {
+      await invalidateCache('storage_tree');
+      writeStorageLog(`[Storage] Limpeza executada com sucesso! Total liberado: ${formatBytes(freedBytes)}. Espaço livre atual: ${formatBytes(currentFree)}.`);
+    }
+
+    if (currentFree < requiredSpace) {
+      const failMsg = `Espaço em disco insuficiente mesmo após apagar arquivos antigos. Necessário: ${formatBytes(requiredSpace)}, Disponível após limpeza: ${formatBytes(currentFree)}.`;
+      writeStorageLog(`[Erro] ${failMsg}`);
+      return {
+        success: false,
+        error: failMsg,
+        freed: freedBytes
+      };
+    }
+
+    return { success: true, freed: freedBytes };
+  } finally {
+    isStorageCleaningActive = false;
+  }
+}
+
+// Guardião de Armazenamento Periódico Ultra-Leve (para hardware fraco / baixo consumo de I/O e CPU)
+function startStorageGuardian() {
+  if (storageGuardianTimer) return;
+  const GUARDIAN_INTERVAL_MS = 60 * 1000; // a cada 60 segundos
+  writeStorageLog('[StorageGuardian] Guardião ultra-leve ativado (verificação a cada 60s via syscall C nativa, zero CPU).');
+
+  storageGuardianTimer = setInterval(async () => {
     try {
-      writeStorageLog(`[Storage] Apagando item antigo no disco: ${item.name} (${formatBytes(item.size)}, modificado em ${new Date(item.mtimeMs).toLocaleString('pt-BR')})`);
-      fs.rmSync(item.path, { recursive: true, force: true });
-      freedBytes += item.size;
-      currentFree += item.size;
+      if (isStorageCleaningActive) return;
 
-      const updatedDisk = await getDiskSpace(downloadPath);
-      if (updatedDisk && typeof updatedDisk.free === 'number') {
-        currentFree = updatedDisk.free;
+      const downloadPath = await discoverDelugePath();
+      if (!downloadPath || !fs.existsSync(downloadPath)) return;
+
+      // Syscall direta em C (statfsSync): ~0.01ms, 0% CPU, sem ler disco
+      const diskSpace = await getDiskSpace(downloadPath);
+      if (!diskSpace || typeof diskSpace.free !== 'number') return;
+
+      const minSetting = await SystemSetting.findOne({ where: { key: 'minFreeSpaceGB' } }).catch(() => null);
+      const minFreeGB = minSetting ? (parseFloat(minSetting.value) || 4) : 4;
+      const minFreeBytes = Math.round(minFreeGB * 1024 * 1024 * 1024);
+
+      // Se o espaço livre cair abaixo do limite seguro (ex: durante download ativo no Deluge)
+      if (diskSpace.free < minFreeBytes) {
+        writeStorageLog(`[StorageGuardian] ATENÇÃO: Espaço livre caiu para ${formatBytes(diskSpace.free)}, abaixo do limite mínimo de segurança (${minFreeGB} GB). Acionando limpeza protetiva automática...`);
+        await ensureDiskSpaceForTorrent(0);
       }
-    } catch (rmErr) {
-      writeStorageLog(`[Storage] Erro ao apagar ${item.path}: ${rmErr.message}`);
+    } catch (err) {
+      console.error('[StorageGuardian] Erro no ciclo de monitoramento:', err.message);
     }
-  }
-
-  if (freedBytes > 0) {
-    await invalidateCache('storage_tree');
-    writeStorageLog(`[Storage] Limpeza executada com sucesso! Total liberado: ${formatBytes(freedBytes)}. Espaço livre atual: ${formatBytes(currentFree)}.`);
-  }
-
-  if (currentFree < requiredSpace) {
-    const failMsg = `Espaço em disco insuficiente mesmo após apagar arquivos antigos. Necessário: ${formatBytes(requiredSpace)}, Disponível após limpeza: ${formatBytes(currentFree)}.`;
-    writeStorageLog(`[Erro] ${failMsg}`);
-    return {
-      success: false,
-      error: failMsg
-    };
-  }
-
-  return { success: true, freed: freedBytes };
+  }, GUARDIAN_INTERVAL_MS);
 }
 
 // Monitora um torrent adicionado no Deluge em segundo plano para obter seu tamanho total assim que os metadados forem resolvidos pelo daemon
-function monitorTorrentMetadataAndEnsureSpace(torrentId, maxAttempts = 15, intervalMs = 4000) {
+function monitorTorrentMetadataAndEnsureSpace(torrentId, maxAttempts = 30, intervalMs = 5000) {
   if (!torrentId) return;
 
   writeStorageLog(`[Storage] Iniciando monitoramento de metadados em segundo plano para o torrent (ID: ${torrentId})...`);
@@ -2547,11 +2578,12 @@ liberarPortaServidor().catch(err => {
       console.error("Erro ao descobrir o caminho inicial do Deluge:", err.message);
     });
 
-    // Executa a verificação inicial de armazenamento na inicialização da aplicação (respeitando os limites)
+    // Executa a verificação inicial de armazenamento na inicialização e ativa o guardião contínuo
     setTimeout(() => {
       runStartupStorageCheck().catch(err => {
         writeStorageLog(`[Startup] Erro na verificação inicial de armazenamento: ${err.message}`);
       });
+      startStorageGuardian();
     }, 3000); // 3 segundos após boot
 
     // Inicia o worker leve de páginas monitoradas com timer inicial de 5 minutos (para não travar a inicialização)
