@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 const { enqueueSearch, stopSearchAgent, stopAllSearchAgents, testConnection, analyzeSearchSource, cancelSearchSourceAnalysis, analysisEvents } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
+const { relayService } = require('./relay_service');
 
 const { exec } = require('child_process');
 const util = require('util');
@@ -23,15 +24,27 @@ let delugeErro = null;
 
 async function verificarDeluge() {
   try {
-    delugeCreds = obterCredenciaisDelugeLocal();
-    const port = delugeCreds.delugeWeb.porta;
-    const password = delugeCreds.delugeWeb.senhaPadraoDetectada ? 'deluge' : 'deluge';
-    
-    const client = new DelugeClient(port, password);
+    let host = 'localhost';
+    let port = 8112;
+    let password = 'deluge';
+
+    try {
+      delugeCreds = obterCredenciaisDelugeLocal();
+      port = delugeCreds.delugeWeb.porta;
+    } catch (e) {}
+
+    const dbHost = await SystemSetting.findOne({ where: { key: 'delugeHost' } }).catch(() => null);
+    const dbPort = await SystemSetting.findOne({ where: { key: 'delugePort' } }).catch(() => null);
+    const dbPassword = await SystemSetting.findOne({ where: { key: 'delugePassword' } }).catch(() => null);
+    if (dbHost && dbHost.value) host = dbHost.value;
+    if (dbPort && dbPort.value) port = parseInt(dbPort.value, 10);
+    if (dbPassword && dbPassword.value) password = dbPassword.value;
+
+    const client = new DelugeClient(port, password, host);
     await client.login();
     delugeDisponivel = true;
     delugeErro = null;
-    console.log(`[Deluge] Conectado com sucesso ao Deluge local na porta ${port}!`);
+    console.log(`[Deluge] Conectado com sucesso ao Deluge (${host}:${port})!`);
   } catch (err) {
     delugeDisponivel = false;
     delugeErro = err.message;
@@ -40,6 +53,7 @@ async function verificarDeluge() {
 }
 
 async function getDelugeClient() {
+  let host = 'localhost';
   let port = 8112;
   let password = 'deluge';
 
@@ -52,15 +66,17 @@ async function getDelugeClient() {
 
   // Permitir sobrescrever via banco de dados
   try {
-    const dbPort = await SystemSetting.findOne({ where: { key: 'delugePort' } });
-    const dbPassword = await SystemSetting.findOne({ where: { key: 'delugePassword' } });
+    const dbHost = await SystemSetting.findOne({ where: { key: 'delugeHost' } }).catch(() => null);
+    const dbPort = await SystemSetting.findOne({ where: { key: 'delugePort' } }).catch(() => null);
+    const dbPassword = await SystemSetting.findOne({ where: { key: 'delugePassword' } }).catch(() => null);
+    if (dbHost && dbHost.value) host = dbHost.value;
     if (dbPort && dbPort.value) port = parseInt(dbPort.value, 10);
     if (dbPassword && dbPassword.value) password = dbPassword.value;
   } catch (e) {
     // Ignorar erros do banco ao obter configurações adicionais
   }
 
-  const client = new DelugeClient(port, password);
+  const client = new DelugeClient(port, password, host);
   await client.login();
   return client;
 }
@@ -225,6 +241,48 @@ app.post('/api/settings/test', async (req, res) => {
   try {
     const config = req.body;
     const result = await testConnection(config);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- ROTAS DO TÚNEL RELAY (OAuth & Webhooks) ---
+app.get('/api/relay/status', (req, res) => {
+  res.json(relayService.getStatus());
+});
+
+app.post('/api/relay/save', async (req, res) => {
+  try {
+    const status = await relayService.saveConfig(req.body);
+    res.json({ success: true, status });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/relay/connect', async (req, res) => {
+  try {
+    await relayService.start();
+    res.json({ success: true, status: relayService.getStatus() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/relay/disconnect', (req, res) => {
+  try {
+    relayService.stop();
+    res.json({ success: true, status: relayService.getStatus() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/relay/test', async (req, res) => {
+  try {
+    const { serverUrl, accessToken, uid } = req.body;
+    const result = await relayService.testConnection(serverUrl, accessToken, uid);
     res.json(result);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -852,6 +910,18 @@ app.get('/api/deluge/status', async (req, res) => {
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Testa conexão com Deluge usando credenciais customizadas
+app.post('/api/deluge/test-connection', async (req, res) => {
+  try {
+    const { host, port, password } = req.body;
+    const client = new DelugeClient(port || 8112, password || 'deluge', host || 'localhost');
+    await client.login();
+    res.json({ success: true, message: `Conexão bem-sucedida com o Deluge Web em ${host || 'localhost'}:${port || 8112}!` });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -2625,6 +2695,11 @@ liberarPortaServidor().catch(err => {
       console.log(` IP Local: http://${ipLocal}:${PORT}`);
       console.log(` Banco de dados SQLite conectado com sucesso.`);
       console.log(`===================================================`);
+
+      // Inicializa o serviço de túnel Relay caso esteja habilitado
+      relayService.init().catch(err => {
+        console.error('[RelayService] Erro ao inicializar serviço de relay:', err.message);
+      });
     });
 
     serverInstance.on('error', (err) => {
@@ -2653,6 +2728,11 @@ liberarPortaServidor().catch(err => {
           await new Promise(resolve => serverInstance.close(resolve));
           console.log('[Shutdown] Servidor HTTP fechado com sucesso.');
         }
+
+        try {
+          relayService.stop();
+          console.log('[Shutdown] Serviço Relay desconectado.');
+        } catch (e) {}
 
         try {
           const { stopAllSearchAgents } = require('./agent');

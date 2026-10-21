@@ -888,6 +888,22 @@ async function fetchSettings() {
     // Atualiza estatísticas de tamanho total e espaço livre do disco
     updateDiskSpaceInfo();
 
+    // Configurações do Túnel Relay
+    const relayEnabledCheck = document.getElementById('relayEnabled');
+    if (relayEnabledCheck) {
+      relayEnabledCheck.checked = config.relay_enabled === 'true' || config.relay_enabled === true;
+    }
+    setVal('relayServerUrl', config.relay_server_url || 'https://relay.exemplo.com');
+    setVal('relayAccessToken', config.relay_access_token || '');
+    setVal('relayUid', config.relay_uid || 'hunter_torrent_local');
+    setVal('relayTargetUrl', config.relay_target_url || (window.location.origin || 'http://localhost:4182'));
+    setVal('delugeHost', config.delugeHost || 'localhost');
+    setVal('delugePort', config.delugePort || '8112');
+    setVal('delugePassword', config.delugePassword || 'deluge');
+
+    // Carrega status operacional do relay
+    loadRelayStatus();
+
   } catch (err) {
 
     console.error("Erro ao carregar configurações:", err);
@@ -980,11 +996,263 @@ async function saveStorageSettings(btn) {
 
   const payload = {
     autoDeleteOldFiles: autoDelCheck ? (autoDelCheck.checked ? 'true' : 'false') : 'true',
-    minFreeSpaceGB: minFreeInput ? minFreeInput.value.trim() : '4'
+    minFreeSpaceGB: minFreeInput ? minFreeInput.value.trim() : '4',
+    delugeHost: (document.getElementById('delugeHost') ? document.getElementById('delugeHost').value.trim() : 'localhost') || 'localhost',
+    delugePort: (document.getElementById('delugePort') ? document.getElementById('delugePort').value.trim() : '8112') || '8112',
+    delugePassword: document.getElementById('delugePassword') ? document.getElementById('delugePassword').value : 'deluge'
   };
 
   await savePartialSettings(payload, btn, "Espaço");
 }
+
+
+
+
+// Testar Conexão com o Deluge Web usando as credenciais informadas
+async function testDelugeConnection(btn) {
+  if (!btn || btn.disabled) return;
+  const host = (document.getElementById('delugeHost') ? document.getElementById('delugeHost').value.trim() : 'localhost') || 'localhost';
+  const port = (document.getElementById('delugePort') ? document.getElementById('delugePort').value.trim() : '8112') || '8112';
+  const password = (document.getElementById('delugePassword') ? document.getElementById('delugePassword').value : 'deluge') || 'deluge';
+
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-xs"></i> Testando...`;
+
+  try {
+    const res = await fetch('/api/deluge/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port: parseInt(port, 10), password })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      await alert(`Sucesso!
+
+${data.message}`);
+    } else {
+      await alert(`Falha na conexão com o Deluge Web:
+
+${data.error}`);
+    }
+  } catch (err) {
+    await alert(`Erro ao testar comunicação com o Deluge: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+// ==========================================
+// FUNÇÕES DO TÚNEL RELAY (OAuth & Webhooks)
+// ==========================================
+
+// Carregar status do Túnel Relay
+async function loadRelayStatus() {
+  try {
+    const res = await fetch('/api/relay/status');
+    if (!res.ok) return;
+    const data = await res.json();
+    updateRelayUI(data);
+  } catch (err) {
+    console.error('Erro ao carregar status do relay:', err);
+  }
+}
+
+// Atualiza elementos visuais do Relay na página de configurações
+function updateRelayUI(data) {
+  const badge = document.getElementById('relayStatusBadge');
+  const toggleBtn = document.getElementById('toggleRelayConnectBtn');
+  const endpointWebhook = document.getElementById('relayEndpointWebhook');
+  const endpointSse = document.getElementById('relayEndpointSse');
+  const eventsCount = document.getElementById('relayEventsCount');
+  const lastEventText = document.getElementById('relayLastEventText');
+
+  if (endpointWebhook && data.endpoints) {
+    endpointWebhook.textContent = data.endpoints.webhook_ingest || '-';
+  }
+  if (endpointSse && data.endpoints) {
+    endpointSse.textContent = data.endpoints.events_sse || '-';
+  }
+  if (eventsCount) {
+    eventsCount.textContent = data.eventsReceivedCount || 0;
+  }
+  if (lastEventText) {
+    if (data.lastEventAt) {
+      const dt = new Date(data.lastEventAt).toLocaleTimeString();
+      lastEventText.textContent = `Último comando recebido às ${dt}`;
+    } else {
+      lastEventText.textContent = 'Nenhum comando recebido ainda';
+    }
+  }
+
+  if (badge) {
+    if (data.status === 'connected') {
+      badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800';
+      badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span> Conectado';
+    } else if (data.status === 'connecting' || data.status === 'reconnecting') {
+      badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400 border border-amber-300 dark:border-amber-800';
+      badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-amber-500 mr-1.5 animate-spin"></span> Conectando...';
+    } else if (data.status === 'error') {
+      badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-400 border border-red-300 dark:border-red-800';
+      badge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-red-500 mr-1.5"></span> Falha na Conexão`;
+      badge.title = data.lastError || '';
+    } else {
+      badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-300 dark:border-slate-700';
+      badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-slate-400 mr-1.5"></span> Desconectado';
+    }
+  }
+
+  if (toggleBtn) {
+    if (data.status === 'connected') {
+      toggleBtn.className = 'py-2 px-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-sm transition-all active:scale-95';
+      toggleBtn.innerHTML = '<i class="ph-bold ph-stop text-sm"></i> Desconectar Túnel';
+    } else {
+      toggleBtn.className = 'py-2 px-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-sm transition-all active:scale-95';
+      toggleBtn.innerHTML = '<i class="ph-bold ph-power text-sm"></i> Conectar Túnel';
+    }
+  }
+}
+
+// Salvar Configurações do Túnel Relay
+async function saveRelaySettings(btn) {
+  const enabledCheck = document.getElementById('relayEnabled');
+  const serverUrlInput = document.getElementById('relayServerUrl');
+  const accessTokenInput = document.getElementById('relayAccessToken');
+  const uidInput = document.getElementById('relayUid');
+  const targetUrlInput = document.getElementById('relayTargetUrl');
+
+  const payload = {
+    enabled: enabledCheck ? enabledCheck.checked : false,
+    serverUrl: serverUrlInput ? serverUrlInput.value.trim() : 'https://relay.exemplo.com',
+    accessToken: accessTokenInput ? accessTokenInput.value.trim() : '',
+    uid: uidInput ? uidInput.value.trim() : 'hunter_torrent_local',
+    targetUrl: targetUrlInput ? targetUrlInput.value.trim() : 'http://localhost:4182'
+  };
+
+  if (!btn || btn.disabled) return;
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Salvando...`;
+
+  try {
+    const res = await fetch('/api/relay/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!data.success) {
+      throw new Error(data.error || 'Erro ao salvar configurações do relay.');
+    }
+
+    if (data.status) {
+      updateRelayUI(data.status);
+    }
+
+    btn.innerHTML = `<i class="ph-bold ph-check text-sm"></i> Configurações Salvas!`;
+    btn.classList.add('bg-emerald-600', 'hover:bg-emerald-700');
+
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+      btn.classList.remove('bg-emerald-600', 'hover:bg-emerald-700');
+    }, 2000);
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    await alert('Erro ao salvar configurações do Relay: ' + err.message);
+  }
+}
+
+// Testar Conexão com o Servidor Relay
+async function testRelayConnection(btn) {
+  if (!btn || btn.disabled) return;
+  const serverUrl = document.getElementById('relayServerUrl').value.trim();
+  const accessToken = document.getElementById('relayAccessToken').value.trim();
+  const uid = document.getElementById('relayUid').value.trim();
+
+  if (!serverUrl || serverUrl.includes('exemplo.com')) {
+    await alert('Por favor, informe a URL real do servidor Relay antes de testar (não utilize a URL de exemplo genérica).');
+    return;
+  }
+  if (!accessToken) {
+    await alert('Por favor, preencha o Token de Acesso (Bearer Token) do Relay.');
+    return;
+  }
+
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Testando...`;
+
+  try {
+    const res = await fetch('/api/relay/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverUrl, accessToken, uid })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      await alert(`Sucesso!\n\n${data.message}\nTotal de túneis registrados: ${data.totalTunnels}\nTúnel com UID '${uid}' encontrado: ${data.tunnelFound ? 'Sim' : 'Ainda não (será registrado ao conectar)'}`);
+    } else {
+      await alert(`Falha na conexão com o servidor Relay:\n\n${data.error}`);
+    }
+  } catch (err) {
+    await alert(`Erro ao testar comunicação: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+// Alternar Conexão do Túnel (Conectar / Desconectar)
+async function toggleRelayConnection(btn) {
+  if (!btn || btn.disabled) return;
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i> Processando...`;
+
+  try {
+    const statusRes = await fetch('/api/relay/status');
+    const currStatus = await statusRes.json();
+
+    const endpoint = currStatus.status === 'connected' ? '/api/relay/disconnect' : '/api/relay/connect';
+    const res = await fetch(endpoint, { method: 'POST' });
+    const data = await res.json();
+
+    if (data.status) {
+      updateRelayUI(data.status);
+    }
+  } catch (err) {
+    await alert('Erro ao alterar status da conexão do Relay: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Alternar visibilidade de qualquer campo de senha/token
+function togglePasswordVisibility(inputId, iconId) {
+  const input = document.getElementById(inputId);
+  const icon = document.getElementById(iconId);
+  if (!input) return;
+
+  if (input.type === 'password') {
+    input.type = 'text';
+    if (icon) {
+      icon.classList.remove('ph-eye');
+      icon.classList.add('ph-eye-slash');
+    }
+  } else {
+    input.type = 'password';
+    if (icon) {
+      icon.classList.remove('ph-eye-slash');
+      icon.classList.add('ph-eye');
+    }
+  }
+}
+
 
 // Verificar e Limpar Arquivos Antigos (simulando 10MB)
 async function checkAndCleanStorage(btn) {

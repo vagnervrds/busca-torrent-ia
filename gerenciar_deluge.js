@@ -10,9 +10,10 @@ const http = require('http');
  */
 
 class DelugeClient {
-  constructor(port, password) {
+  constructor(port, password, host) {
     this.port = port || 8112;
     this.password = password || 'deluge';
+    this.host = host || 'localhost';
     this.cookie = null;
     this.requestId = 1;
   }
@@ -39,7 +40,7 @@ class DelugeClient {
       }
 
       const req = http.request({
-        hostname: 'localhost',
+        hostname: this.host || 'localhost',
         port: this.port,
         path: '/json',
         method: 'POST',

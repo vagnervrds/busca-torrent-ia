@@ -4,6 +4,9 @@ database.sqlite
 .DS_Store
 tmp/
 *.log
+__pycache__/
+*.pyc
+hunter_cli_config.json
 
 
 3b8a6d91-e40f-4d6b-952b-bc67cf1db428

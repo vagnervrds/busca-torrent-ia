@@ -186,10 +186,13 @@ cleanOldLogs();
 cleanPM2Logs();
 
 // Agenda verificação e limpeza periódica a cada 1 hora
-setInterval(() => {
+const logCleanerInterval = setInterval(() => {
   cleanOldLogs();
   cleanPM2Logs();
 }, 60 * 60 * 1000);
+if (logCleanerInterval && typeof logCleanerInterval.unref === 'function') {
+  logCleanerInterval.unref();
+}
 
 // Captura exceções não tratadas para evitar crashes silenciosos e registrar stack trace
 process.on('uncaughtException', (err) => {
