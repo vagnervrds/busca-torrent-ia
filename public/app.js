@@ -122,7 +122,7 @@ const analysisStatusTitle = document.getElementById('analysisStatusTitle');
 const analysisLogs = document.getElementById('analysisLogs');
 
 // Variáveis do Teste de Conexão de IA
-const testAiBtn = document.getElementById('testAiBtn');
+const testAiBtn = document.getElementById('testAiConnectionBtn') || document.getElementById('testAiBtn');
 const testAiModal = document.getElementById('testAiModal');
 const closeTestAiModalBtn = document.getElementById('closeTestAiModalBtn');
 const closeTestAiBtn = document.getElementById('closeTestAiBtn');
@@ -136,6 +136,7 @@ const testAiResponseContainer = document.getElementById('testAiResponseContainer
 const testAiResponseText = document.getElementById('testAiResponseText');
 const testAiErrorContainer = document.getElementById('testAiErrorContainer');
 const testAiErrorText = document.getElementById('testAiErrorText');
+const testAiErrorTrace = document.getElementById('testAiErrorTrace');
 const testAiLogs = document.getElementById('testAiLogs');
 
 const analysisSourceName = document.getElementById('analysisSourceName');
@@ -519,13 +520,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Ligações de Teste de Conexão de IA
   if (testAiBtn) {
-    testAiBtn.addEventListener('click', testAiConnection);
+    if (!testAiBtn.getAttribute('onclick')) {
+      testAiBtn.addEventListener('click', testAiConnection);
+    }
   }
   if (closeTestAiModalBtn) {
-    closeTestAiModalBtn.addEventListener('click', () => testAiModal.classList.add('hidden'));
+    closeTestAiModalBtn.addEventListener('click', () => {
+      const modal = document.getElementById('testAiModal');
+      if (modal) modal.classList.add('hidden');
+    });
   }
   if (closeTestAiBtn) {
-    closeTestAiBtn.addEventListener('click', () => testAiModal.classList.add('hidden'));
+    closeTestAiBtn.addEventListener('click', () => {
+      const modal = document.getElementById('testAiModal');
+      if (modal) modal.classList.add('hidden');
+    });
+  }
+  const testAiModalBackdrop = document.getElementById('testAiModal');
+  if (testAiModalBackdrop) {
+    testAiModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === testAiModalBackdrop) {
+        testAiModalBackdrop.classList.add('hidden');
+      }
+    });
   }
 
 
@@ -1320,123 +1337,226 @@ async function refreshStoragePath() {
 
 
 // Testar conexão de IA e mostrar logs detalhados
-async function testAiConnection() {
-  // Limpar e resetar modal para estado inicial
-  testAiLogs.innerHTML = '';
-  testAiResponseContainer.classList.add('hidden');
-  testAiErrorContainer.classList.add('hidden');
-  
-  // Resetar container de status para neutro/carregando
-  testAiStatusContainer.className = "flex items-center gap-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/20";
-  testAiSpinner.classList.remove('hidden');
-  testAiSuccessIcon.classList.add('hidden');
-  testAiErrorIcon.classList.add('hidden');
-  testAiStatusTitle.innerText = "Iniciando teste...";
-  testAiStatusSubtitle.innerText = "Preparando envio do prompt para a IA.";
-  
-  // Exibir o modal
-  testAiModal.classList.remove('hidden');
+let isTestingAiConnection = false;
 
-  // Adicionar log inicial local
-  const addLocalLog = (msg) => {
+async function testAiConnection() {
+  if (isTestingAiConnection) return;
+  isTestingAiConnection = true;
+
+  const btn = document.getElementById('testAiConnectionBtn') || document.getElementById('testAiBtn');
+  let originalBtnHtml = '';
+  if (btn) {
+    originalBtnHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.classList.add('opacity-75', 'cursor-not-allowed');
+    btn.innerHTML = '<i class="ph-bold ph-spinner animate-spin text-sm"></i> <span>Testando Conexão...</span>';
+  }
+
+  const modal = document.getElementById('testAiModal');
+  const logsEl = document.getElementById('testAiLogs');
+  const responseContainer = document.getElementById('testAiResponseContainer');
+  const responseText = document.getElementById('testAiResponseText');
+  const errorContainer = document.getElementById('testAiErrorContainer');
+  const errorText = document.getElementById('testAiErrorText');
+  const errorTrace = document.getElementById('testAiErrorTrace');
+  const statusContainer = document.getElementById('testAiStatusContainer');
+  const spinner = document.getElementById('testAiSpinner');
+  const successIcon = document.getElementById('testAiSuccessIcon');
+  const errorIcon = document.getElementById('testAiErrorIcon');
+  const statusTitle = document.getElementById('testAiStatusTitle');
+  const statusSubtitle = document.getElementById('testAiStatusSubtitle');
+
+  // Limpar e resetar modal para estado inicial
+  if (logsEl) logsEl.innerHTML = '';
+  if (responseContainer) responseContainer.classList.add('hidden');
+  if (errorContainer) errorContainer.classList.add('hidden');
+  if (errorTrace) {
+    errorTrace.innerText = '';
+    errorTrace.classList.add('hidden');
+  }
+
+  // Resetar container de status para neutro/carregando
+  if (statusContainer) {
+    statusContainer.className = 'flex items-center gap-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/20 transition-all';
+  }
+  if (spinner) spinner.classList.remove('hidden');
+  if (successIcon) successIcon.classList.add('hidden');
+  if (errorIcon) errorIcon.classList.add('hidden');
+  if (statusTitle) statusTitle.innerText = 'Iniciando teste...';
+  if (statusSubtitle) statusSubtitle.innerText = 'Preparando envio do prompt para a IA.';
+
+  // Exibir o modal
+  if (modal) modal.classList.remove('hidden');
+
+  // Adicionar log local
+  const addLocalLog = (msg, level = 'info') => {
+    if (!logsEl) return;
     const time = new Date().toLocaleTimeString('pt-BR', { hour12: false });
     const logLine = document.createElement('div');
-    logLine.className = "py-0.5 border-b border-slate-100/5 dark:border-slate-900/50 text-[11px] font-mono leading-relaxed";
+    let colorClass = 'text-slate-300';
+    if (level === 'error' || msg.includes('[ERRO]') || msg.includes('[FALHA]')) {
+      colorClass = 'text-rose-400 font-semibold';
+    } else if (level === 'success' || msg.includes('[SUCESSO]')) {
+      colorClass = 'text-emerald-400 font-semibold';
+    } else if (level === 'warn' || msg.includes('[ALERTA]')) {
+      colorClass = 'text-amber-400';
+    }
+    logLine.className = `py-0.5 border-b border-slate-900/60 text-[11px] font-mono leading-relaxed break-all ${colorClass}`;
     logLine.innerText = `[${time}] ${msg}`;
-    testAiLogs.appendChild(logLine);
-    testAiLogs.scrollTop = testAiLogs.scrollHeight;
+    logsEl.appendChild(logLine);
+    logsEl.scrollTop = logsEl.scrollHeight;
   };
 
-  addLocalLog("Lendo parâmetros do formulário...");
-
-  const config = {
-    aiProvider: document.getElementById('aiProvider').value,
-    aiModel: document.getElementById('aiModel').value.trim(),
-    aiUrl: document.getElementById('aiUrl').value.trim(),
-    aiToken: document.getElementById('aiToken').value.trim()
-  };
-
-  if (!config.aiModel) {
-    addLocalLog("[ALERTA] Modelo não especificado! Utilizando valor padrão.");
-  }
-  if (!config.aiUrl) {
-    addLocalLog("[ERRO] URL Base vazia.");
-    testAiSpinner.classList.add('hidden');
-    testAiErrorIcon.classList.remove('hidden');
-    testAiStatusContainer.className = "flex items-center gap-3 p-4 rounded-xl border border-rose-500/30 bg-rose-50/50 dark:bg-rose-950/10";
-    testAiStatusTitle.innerText = "Parâmetros inválidos";
-    testAiStatusSubtitle.innerText = "A URL Base da API é obrigatória.";
-    return;
-  }
-
-  addLocalLog("Enviando requisição de teste para o backend...");
-  
   try {
+    addLocalLog('Lendo parâmetros do formulário de configuração...');
+
+    const aiProviderEl = document.getElementById('aiProvider');
+    const aiModelEl = document.getElementById('aiModel');
+    const aiUrlEl = document.getElementById('aiUrl');
+    const aiTokenEl = document.getElementById('aiToken');
+
+    const config = {
+      aiProvider: aiProviderEl ? aiProviderEl.value : 'openai',
+      aiModel: aiModelEl ? aiModelEl.value.trim() : '',
+      aiUrl: aiUrlEl ? aiUrlEl.value.trim() : '',
+      aiToken: aiTokenEl ? aiTokenEl.value.trim() : ''
+    };
+
+    addLocalLog(`Provedor selecionado: "${config.aiProvider}"`);
+    addLocalLog(`Modelo configurado: "${config.aiModel || '(padrão)'}"`);
+    addLocalLog(`URL Base configurada: "${config.aiUrl || '(não informada)'}"`);
+    addLocalLog(`Token de Autorização: ${config.aiToken ? 'Presente (' + config.aiToken.substring(0, Math.min(4, config.aiToken.length)) + '...)' : '(não informado)'}`);
+
+    if (!config.aiUrl) {
+      addLocalLog('[ERRO] URL Base vazia. É obrigatório informar a URL base da API.', 'error');
+      if (spinner) spinner.classList.add('hidden');
+      if (errorIcon) errorIcon.classList.remove('hidden');
+      if (statusContainer) statusContainer.className = 'flex items-center gap-3 p-4 rounded-xl border border-rose-500/30 bg-rose-50/50 dark:bg-rose-950/10';
+      if (statusTitle) statusTitle.innerText = 'Parâmetros inválidos';
+      if (statusSubtitle) statusSubtitle.innerText = 'A URL Base da API é obrigatória.';
+      if (errorText) errorText.innerText = 'A URL Base da API não foi preenchida. Por favor, forneça o endereço da API (ex: http://localhost:8045/v1 ou https://api.openai.com/v1).';
+      if (errorContainer) errorContainer.classList.remove('hidden');
+      return;
+    }
+
+    addLocalLog('Enviando requisição de teste para o backend local (/api/settings/test)...');
+    if (statusTitle) statusTitle.innerText = 'Aguardando resposta da IA...';
+    if (statusSubtitle) statusSubtitle.innerText = 'Enviando chamada HTTP para o provedor configurado.';
+
     const res = await fetch('/api/settings/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config)
     });
-    
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    }
-    
-    const result = await res.json();
-    
-    // Função para animar a exibição dos logs linha por linha
-    const printLogsSequentially = async (logsArray) => {
-      for (const logLineText of logsArray) {
-        // Extrai a mensagem de log limpa se começar com timestamp, ou apenas imprime
-        const cleanText = logLineText.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
-        addLocalLog(cleanText);
-        // Pequeno atraso para dar um efeito visual incrível!
-        await new Promise(resolve => setTimeout(resolve, 80));
-      }
-    };
 
-    if (result.logs && Array.isArray(result.logs)) {
-      await printLogsSequentially(result.logs);
+    let result;
+    try {
+      result = await res.json();
+    } catch (parseErr) {
+      const rawText = await res.text().catch(() => '');
+      throw new Error(`Falha na resposta HTTP ${res.status}: ${rawText || res.statusText}`);
     }
-    
+
+    // Exibir logs retornados pelo backend
+    if (result.logs && Array.isArray(result.logs)) {
+      for (const logLineText of result.logs) {
+        const cleanText = logLineText.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
+        const isErr = cleanText.includes('[ERRO]') || cleanText.includes('Erro') || cleanText.includes('HTTP 4') || cleanText.includes('HTTP 5');
+        addLocalLog(cleanText, isErr ? 'error' : 'info');
+      }
+    }
+
     if (result.success) {
-      addLocalLog("[SUCESSO] Teste de conexão finalizado com êxito!");
-      
+      addLocalLog('[SUCESSO] Teste de conexão finalizado com êxito!', 'success');
+
       // Atualizar status para sucesso
-      testAiSpinner.classList.add('hidden');
-      testAiSuccessIcon.classList.remove('hidden');
-      testAiStatusContainer.className = "flex items-center gap-3 p-4 rounded-xl border border-emerald-500/30 bg-emerald-50/50 dark:bg-emerald-950/10";
-      testAiStatusTitle.innerText = "Conexão de IA ativa!";
-      testAiStatusSubtitle.innerText = "O modelo respondeu corretamente.";
-      
+      if (spinner) spinner.classList.add('hidden');
+      if (successIcon) successIcon.classList.remove('hidden');
+      if (statusContainer) statusContainer.className = 'flex items-center gap-3 p-4 rounded-xl border border-emerald-500/30 bg-emerald-50/50 dark:bg-emerald-950/10';
+      if (statusTitle) statusTitle.innerText = 'Conexão de IA ativa!';
+      if (statusSubtitle) statusSubtitle.innerText = 'O modelo respondeu corretamente à chamada de teste.';
+
       // Mostrar resposta
-      testAiResponseText.innerText = result.responseText || "ok (ou nenhuma resposta de texto extraída)";
-      testAiResponseContainer.classList.remove('hidden');
+      if (responseText) {
+        responseText.innerText = result.responseText || (result.data ? JSON.stringify(result.data, null, 2) : 'ok');
+      }
+      if (responseContainer) responseContainer.classList.remove('hidden');
     } else {
-      addLocalLog("[FALHA] Teste de conexão falhou.");
-      
+      addLocalLog(`[FALHA] Teste de conexão falhou: ${result.error || 'Erro desconhecido'}`, 'error');
+
       // Atualizar status para erro
-      testAiSpinner.classList.add('hidden');
-      testAiErrorIcon.classList.remove('hidden');
-      testAiStatusContainer.className = "flex items-center gap-3 p-4 rounded-xl border border-rose-500/30 bg-rose-50/50 dark:bg-rose-950/10";
-      testAiStatusTitle.innerText = "Erro ao conectar com a IA";
-      testAiStatusSubtitle.innerText = "O provedor retornou uma falha.";
-      
-      // Mostrar detalhes do erro
-      testAiErrorText.innerText = result.error || "Erro desconhecido";
-      testAiErrorContainer.classList.remove('hidden');
+      if (spinner) spinner.classList.add('hidden');
+      if (errorIcon) errorIcon.classList.remove('hidden');
+      if (statusContainer) statusContainer.className = 'flex items-center gap-3 p-4 rounded-xl border border-rose-500/30 bg-rose-50/50 dark:bg-rose-950/10';
+      if (statusTitle) statusTitle.innerText = 'Erro ao conectar com a IA';
+      if (statusSubtitle) statusSubtitle.innerText = 'O provedor retornou uma falha ou rejeitou a conexão.';
+
+      // Mostrar mensagem de erro e trace
+      if (errorText) errorText.innerText = result.error || 'Erro desconhecido retornado pela API.';
+      if (errorTrace && (result.trace || result.stack)) {
+        errorTrace.innerText = result.trace || result.stack;
+        errorTrace.classList.remove('hidden');
+      }
+      if (errorContainer) errorContainer.classList.remove('hidden');
     }
   } catch (err) {
-    addLocalLog(`[ERRO DE CONEXÃO] Falha ao comunicar com o servidor de busca: ${err.message}`);
-    testAiSpinner.classList.add('hidden');
-    testAiErrorIcon.classList.remove('hidden');
-    testAiStatusContainer.className = "flex items-center gap-3 p-4 rounded-xl border border-rose-500/30 bg-rose-50/50 dark:bg-rose-950/10";
-    testAiStatusTitle.innerText = "Erro de Comunicação";
-    testAiStatusSubtitle.innerText = "Não foi possível enviar a requisição ao servidor local.";
-    
-    testAiErrorText.innerText = err.message || String(err);
-    testAiErrorContainer.classList.remove('hidden');
+    addLocalLog(`[ERRO DE COMUNICAÇÃO] ${err.message || String(err)}`, 'error');
+    if (err.stack) {
+      addLocalLog(`Stack do cliente:\n${err.stack}`, 'error');
+    }
+
+    if (spinner) spinner.classList.add('hidden');
+    if (errorIcon) errorIcon.classList.remove('hidden');
+    if (statusContainer) statusContainer.className = 'flex items-center gap-3 p-4 rounded-xl border border-rose-500/30 bg-rose-50/50 dark:bg-rose-950/10';
+    if (statusTitle) statusTitle.innerText = 'Erro de Comunicação';
+    if (statusSubtitle) statusSubtitle.innerText = 'Não foi possível enviar a requisição ao servidor local.';
+
+    if (errorText) errorText.innerText = err.message || String(err);
+    if (errorTrace && err.stack) {
+      errorTrace.innerText = err.stack;
+      errorTrace.classList.remove('hidden');
+    }
+    if (errorContainer) errorContainer.classList.remove('hidden');
+  } finally {
+    isTestingAiConnection = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove('opacity-75', 'cursor-not-allowed');
+      btn.innerHTML = originalBtnHtml;
+    }
   }
+}
+
+// Copia o trace e logs de erro para a área de transferência
+function copyAiErrorTrace() {
+  const errText = document.getElementById('testAiErrorText')?.innerText || '';
+  const traceText = document.getElementById('testAiErrorTrace')?.innerText || '';
+  const logsEl = document.getElementById('testAiLogs');
+  const logs = logsEl ? logsEl.innerText : '';
+
+  const fullReport = [
+    errText ? `=== ERRO ===\n${errText}` : '',
+    traceText ? `=== TRACE / DETALHES TÉCNICOS ===\n${traceText}` : '',
+    logs ? `=== LOGS DE EXECUÇÃO ===\n${logs}` : ''
+  ].filter(Boolean).join('\n\n');
+
+  if (!fullReport) return;
+
+  const copyBtn = document.getElementById('copyAiErrorBtn');
+  navigator.clipboard.writeText(fullReport).then(() => {
+    if (copyBtn) {
+      const origHtml = copyBtn.innerHTML;
+      copyBtn.innerHTML = '<i class="ph-bold ph-check text-emerald-500"></i> Copiado!';
+      setTimeout(() => { copyBtn.innerHTML = origHtml; }, 2000);
+    }
+    if (typeof showDelugeToast === 'function') {
+      showDelugeToast('Trace e logs copiados com sucesso!', 'success');
+    }
+  }).catch(() => {
+    if (copyBtn) {
+      copyBtn.innerText = 'Falha ao copiar';
+    }
+  });
 }
 
 

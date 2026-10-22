@@ -1700,10 +1700,19 @@ async function testConnection(config) {
     
     const messages = [{ role: 'user', content: 'respond only with "ok"' }];
     
+    let base = (config.aiUrl || '').trim();
+    if (base && !base.startsWith('http://') && !base.startsWith('https://')) {
+      if (base.startsWith('localhost') || base.startsWith('127.0.0.1')) {
+        base = `http://${base}`;
+      } else {
+        base = `https://${base}`;
+      }
+    }
+
     if (config.aiProvider === 'anthropic') {
-      endpoint = config.aiUrl.endsWith('/messages') 
-        ? config.aiUrl 
-        : (config.aiUrl.endsWith('/v1') ? `${config.aiUrl}/messages` : `${config.aiUrl}/v1/messages`);
+      endpoint = base.endsWith('/messages') 
+        ? base 
+        : (base.endsWith('/v1') ? `${base}/messages` : `${base}/v1/messages`);
         
       const maskedToken = config.aiToken 
         ? `${config.aiToken.substring(0, Math.min(8, config.aiToken.length))}...` 
@@ -1714,24 +1723,26 @@ async function testConnection(config) {
       headers['anthropic-version'] = '2023-06-01';
       
       body = {
-        model: config.aiModel,
+        model: config.aiModel || 'claude-3-5-sonnet',
         max_tokens: 10,
         messages: [{ role: 'user', content: 'respond only with "ok"' }]
       };
     } else {
-      endpoint = config.aiUrl.endsWith('/chat/completions') 
-        ? config.aiUrl 
-        : (config.aiUrl.endsWith('/v1') ? `${config.aiUrl}/chat/completions` : `${config.aiUrl}/v1/chat/completions`);
+      endpoint = base.endsWith('/chat/completions') 
+        ? base 
+        : (base.endsWith('/v1') ? `${base}/chat/completions` : `${base}/v1/chat/completions`);
         
       const maskedToken = config.aiToken 
         ? `${config.aiToken.substring(0, Math.min(8, config.aiToken.length))}...` 
         : 'ausente';
       addLog(`Preparando headers para OpenAI/Compatível (Authorization: Bearer ${maskedToken})`);
       
-      headers['Authorization'] = `Bearer ${config.aiToken}`;
+      if (config.aiToken) {
+        headers['Authorization'] = `Bearer ${config.aiToken}`;
+      }
       
       body = {
-        model: config.aiModel,
+        model: config.aiModel || 'gpt-4o-mini',
         messages: messages,
         max_tokens: 10
       };
@@ -1742,27 +1753,65 @@ async function testConnection(config) {
     
     addLog(`Enviando requisição HTTP...`);
     const startTime = Date.now();
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify(body)
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
     const duration = Date.now() - startTime;
     addLog(`Resposta HTTP recebida em ${duration}ms com status: ${response.status} ${response.statusText}`);
     
     if (!response.ok) {
-      const errorText = await response.text();
-      addLog(`Erro da API: HTTP ${response.status} - ${errorText}`);
+      let errorBody = '';
+      try {
+        errorBody = await response.text();
+      } catch (readErr) {
+        errorBody = `[Falha ao ler corpo: ${readErr.message}]`;
+      }
+      addLog(`Erro da API: HTTP ${response.status} ${response.statusText}`);
+      if (errorBody) {
+        addLog(`Corpo retornado pela API:\n${errorBody}`);
+      }
       return {
         success: false,
-        error: `API respondeu com erro ${response.status}: ${errorText}`,
+        error: `API respondeu com status HTTP ${response.status} (${response.statusText})`,
+        trace: errorBody,
         logs: logs
       };
     }
     
-    const data = await response.json();
-    addLog(`Corpo da resposta parseado com sucesso.`);
-    addLog(`JSON retornado: ${JSON.stringify(data)}`);
+    let rawText = '';
+    try {
+      rawText = await response.text();
+    } catch (readErr) {
+      throw new Error(`Falha ao ler resposta da API: ${readErr.message}`);
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+      addLog(`Corpo da resposta parseado com sucesso como JSON.`);
+      addLog(`JSON retornado: ${JSON.stringify(data)}`);
+    } catch (parseErr) {
+      addLog(`Falha ao parsear JSON retornado: ${parseErr.message}`);
+      addLog(`Resposta bruta recebida: ${rawText.substring(0, 500)}`);
+      return {
+        success: false,
+        error: `API respondeu com status 200, mas o conteúdo retornado não é um JSON válido.`,
+        trace: `Erro do parser: ${parseErr.message}\n\nResposta recebida:\n${rawText}`,
+        logs: logs
+      };
+    }
     
     // Tenta extrair a mensagem de resposta
     let textResponse = '';
@@ -1789,10 +1838,18 @@ async function testConnection(config) {
       logs: logs
     };
   } catch (err) {
-    addLog(`Erro capturado (exceção): ${err.message || String(err)}`);
+    const isTimeout = err.name === 'AbortError';
+    const errorMsg = isTimeout 
+      ? 'Tempo limite de 25 segundos esgotado ao tentar comunicar com a API.' 
+      : (err.message || String(err));
+    addLog(`Erro capturado (exceção): ${errorMsg}`);
+    if (err.stack) {
+      addLog(`Stack trace:\n${err.stack}`);
+    }
     return {
       success: false,
-      error: err.message || String(err),
+      error: errorMsg,
+      trace: err.stack || String(err),
       logs: logs
     };
   }

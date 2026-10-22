@@ -243,7 +243,13 @@ app.post('/api/settings/test', async (req, res) => {
     const result = await testConnection(config);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error('Erro na rota /api/settings/test:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || String(err),
+      trace: err.stack || null,
+      logs: [`[ERRO INTERNO NO SERVIDOR] ${err.message || String(err)}`]
+    });
   }
 });
 

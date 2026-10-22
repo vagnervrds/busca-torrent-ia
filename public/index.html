@@ -954,8 +954,8 @@
                   <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Defina a API de IA responsável pela interpretação inteligente das buscas e raspagem</p>
                 </div>
               </div>
-              <button type="button" id="testAiConnectionBtn" onclick="testAiConnection()" class="py-2 px-3.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all active:scale-95 self-start sm:self-auto">
-                <i class="ph-bold ph-sparkle text-sm"></i> Testar Conexão
+              <button type="button" id="testAiConnectionBtn" onclick="testAiConnection()" class="py-2 px-3.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all active:scale-95 self-start sm:self-auto cursor-pointer">
+                <i class="ph-bold ph-sparkle text-sm"></i> <span>Testar Conexão</span>
               </button>
             </div>
 
@@ -1924,6 +1924,84 @@
           Cancelar Análise
         </button>
         <button type="button" id="closeBatchBtn" class="py-2 px-4 bg-slate-100 hover:bg-slate-202 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-705 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors">
+          Fechar
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE TESTE DE CONEXÃO DE IA -->
+  <div id="testAiModal" class="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center hidden p-4 font-sans animate-fadeIn">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 w-full max-w-xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-scaleIn">
+      <!-- Modal Header -->
+      <div class="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-950/40">
+        <h3 class="font-bold text-sm text-slate-800 dark:text-slate-100 flex items-center gap-2">
+          <i class="ph-bold ph-cpu text-indigo-500 text-base"></i> Diagnóstico de Conexão com IA
+        </h3>
+        <button id="closeTestAiModalBtn" type="button" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+          <i class="ph-bold ph-x"></i>
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-6 overflow-y-auto space-y-4 flex-1">
+        <!-- Status Banner -->
+        <div id="testAiStatusContainer" class="flex items-center gap-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/20 transition-all">
+          <div id="testAiSpinner" class="w-8 h-8 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin flex-shrink-0"></div>
+          <div id="testAiSuccessIcon" class="w-8 h-8 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center text-lg flex-shrink-0 hidden">
+            <i class="ph-bold ph-check-circle"></i>
+          </div>
+          <div id="testAiErrorIcon" class="w-8 h-8 rounded-full bg-rose-500/10 text-rose-500 flex items-center justify-center text-lg flex-shrink-0 hidden">
+            <i class="ph-bold ph-warning-circle"></i>
+          </div>
+          <div class="min-w-0 flex-1">
+            <h4 id="testAiStatusTitle" class="font-bold text-xs text-slate-800 dark:text-slate-100">Iniciando teste...</h4>
+            <p id="testAiStatusSubtitle" class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">Preparando envio do prompt para a IA.</p>
+          </div>
+        </div>
+
+        <!-- Terminal Logs -->
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+            <span class="flex items-center gap-1.5"><i class="ph-bold ph-terminal-window"></i> Log de Execução em Tempo Real</span>
+          </div>
+          <div id="testAiLogs" class="w-full bg-slate-950 border border-slate-800/80 rounded-xl p-3 font-mono text-[11px] leading-relaxed h-44 overflow-y-auto shadow-inner space-y-1 select-text">
+            <!-- Linhas de log inseridas dinamicamente -->
+          </div>
+        </div>
+
+        <!-- Response Container (Success) -->
+        <div id="testAiResponseContainer" class="hidden space-y-1.5">
+          <span class="block text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+            <i class="ph-bold ph-chat-circle-dots"></i> Resposta do Modelo
+          </span>
+          <div class="p-3 bg-emerald-500/5 dark:bg-emerald-950/20 border border-emerald-500/20 rounded-xl text-xs font-mono text-emerald-700 dark:text-emerald-300 break-words leading-relaxed select-text" id="testAiResponseText">
+          </div>
+        </div>
+
+        <!-- Error & Trace Container (Failure) -->
+        <div id="testAiErrorContainer" class="hidden space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="block text-[11px] font-bold text-rose-500 uppercase tracking-wider flex items-center gap-1.5">
+              <i class="ph-bold ph-bug"></i> Trace & Detalhes do Erro
+            </span>
+            <button type="button" id="copyAiErrorBtn" onclick="copyAiErrorTrace()" class="text-[11px] px-2.5 py-1 font-semibold rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/20 flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer">
+              <i class="ph-bold ph-copy"></i> Copiar Trace
+            </button>
+          </div>
+          <div class="p-3 bg-rose-500/5 dark:bg-rose-950/30 border border-rose-500/20 rounded-xl space-y-2 select-text">
+            <div id="testAiErrorText" class="text-xs font-semibold text-rose-600 dark:text-rose-400 font-mono break-words leading-relaxed"></div>
+            <pre id="testAiErrorTrace" class="hidden mt-2 p-3 bg-slate-950/90 rounded-lg text-[11px] text-slate-300 font-mono overflow-x-auto max-h-48 border border-white/5 whitespace-pre-wrap leading-relaxed select-text"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="p-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-950/40">
+        <span class="text-[11px] text-slate-400 dark:text-slate-500 flex items-center gap-1">
+          <i class="ph-bold ph-shield-check"></i> Teste com prompt leve (10 tokens máx)
+        </span>
+        <button type="button" id="closeTestAiBtn" class="py-2 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-colors cursor-pointer">
           Fechar
         </button>
       </div>
