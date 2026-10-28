@@ -1796,6 +1796,24 @@ app.post('/api/deluge/torrents/remove-errors', async (req, res) => {
   }
 });
 
+// Remove múltiplos torrents por ID (com opção de apagar dados do disco)
+app.post('/api/deluge/torrents/remove-multiple', async (req, res) => {
+  const { ids, removeData = true } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ success: false, error: 'Nenhum torrent informado para remoção' });
+  }
+  try {
+    const client = await getDelugeClient();
+    const promises = ids.map(id => client.remove(id, removeData === true));
+    await Promise.all(promises);
+    
+    await invalidateCache('deluge_torrents', 'storage_tree');
+    res.json({ success: true, count: ids.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 // --- 11. ROTAS DO ARMAZENAMENTO (WIZTREE STYLE) ---
 

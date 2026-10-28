@@ -230,6 +230,7 @@ const delugeSection = document.getElementById('delugeSection');
 
 const refreshDelugeBtn = document.getElementById('refreshDelugeBtn');
 const searchDelugeInput = document.getElementById('searchDelugeInput');
+const deleteDelugeSearchResultsBtn = document.getElementById('deleteDelugeSearchResultsBtn');
 const clearDelugeErrorsBtn = document.getElementById('clearDelugeErrorsBtn');
 const openAddDelugeUrlBtn = document.getElementById('openAddDelugeUrlBtn');
 
@@ -393,6 +394,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   downloadAllDelugeBtn.addEventListener('click', downloadAllTorrentsInDeluge);
   searchDelugeInput.addEventListener('input', () => renderDelugeTorrents(delugeTorrentsCache));
+  if (deleteDelugeSearchResultsBtn) deleteDelugeSearchResultsBtn.addEventListener('click', deleteDelugeSearchResults);
   clearDelugeErrorsBtn.addEventListener('click', clearDelugeErrors);
 
   if (openAddDelugeUrlBtn) openAddDelugeUrlBtn.addEventListener('click', openDelugeAddUrlModal);
@@ -3485,6 +3487,19 @@ function renderDelugeTorrents(torrents) {
     ? ids.filter(id => torrents[id].name.toLowerCase().includes(searchQuery))
     : ids;
 
+  // Atualizar visibilidade do botão de apagar resultados da busca
+  if (deleteDelugeSearchResultsBtn) {
+    if (searchQuery) {
+      deleteDelugeSearchResultsBtn.classList.remove('hidden');
+      deleteDelugeSearchResultsBtn.title = `Apagar ${filteredIds.length} torrent(s) e arquivos encontrados no resultado da busca`;
+      deleteDelugeSearchResultsBtn.disabled = filteredIds.length === 0;
+      deleteDelugeSearchResultsBtn.classList.toggle('opacity-50', filteredIds.length === 0);
+      deleteDelugeSearchResultsBtn.classList.toggle('cursor-not-allowed', filteredIds.length === 0);
+    } else {
+      deleteDelugeSearchResultsBtn.classList.add('hidden');
+    }
+  }
+
   // Calcular estatísticas globais
   let total = ids.length;
   let downloading = 0;
@@ -4089,6 +4104,54 @@ async function clearDelugeErrors() {
   } finally {
     clearDelugeErrorsBtn.disabled = false;
     clearDelugeErrorsBtn.innerHTML = `<i class="ph-bold ph-trash"></i> Apagar Erros`;
+  }
+}
+
+async function deleteDelugeSearchResults() {
+  const searchQuery = (searchDelugeInput?.value || '').toLowerCase().trim();
+  if (!searchQuery) return;
+
+  const torrents = delugeTorrentsCache || {};
+  const ids = Object.keys(torrents);
+  const filteredIds = ids.filter(id => (torrents[id]?.name || '').toLowerCase().includes(searchQuery));
+
+  if (filteredIds.length === 0) {
+    await alert(`Nenhum torrent encontrado para a busca "${searchQuery}".`);
+    return;
+  }
+
+  const confirmDelete = await confirm(`Deseja remover todos os ${filteredIds.length} torrent(s) encontrados na busca "${searchQuery}"?\n\nEsta ação excluirá permanentemente os torrents e TODOS os seus arquivos no disco.`);
+  if (!confirmDelete) return;
+
+  try {
+    if (deleteDelugeSearchResultsBtn) {
+      deleteDelugeSearchResultsBtn.disabled = true;
+      deleteDelugeSearchResultsBtn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> Apagando...`;
+    }
+
+    const res = await fetch('/api/deluge/torrents/remove-multiple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: filteredIds, removeData: true })
+    });
+
+    const data = await res.json();
+    if (data.success) {
+      await alert(`${data.count} torrent(s) e seus respectivos arquivos foram removidos com sucesso.`);
+      if (searchDelugeInput) {
+        searchDelugeInput.value = '';
+      }
+      fetchDelugeTorrents();
+    } else {
+      throw new Error(data.error || "Erro ao apagar torrents");
+    }
+  } catch (err) {
+    await alert("Erro ao apagar resultados da busca: " + err.message);
+  } finally {
+    if (deleteDelugeSearchResultsBtn) {
+      deleteDelugeSearchResultsBtn.disabled = false;
+      deleteDelugeSearchResultsBtn.innerHTML = `<i class="ph-bold ph-trash"></i> Apagar Resultados`;
+    }
   }
 }
 
