@@ -1479,9 +1479,68 @@ app.post('/api/deluge/add-url', async (req, res) => {
 // ENDPOINTS PARA PÁGINAS MONITORADAS (URLs)
 // ==========================================
 
+// Função para remover automaticamente do banco de dados páginas monitoradas há mais de 30 dias sem resultados ou novos resultados
+async function cleanupInactiveMonitoredPages(days = 30) {
+  try {
+    const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const { Op } = require('sequelize');
+
+    // Identifica páginas onde:
+    // 1) Houve conteúdo no passado, mas lastContentChangedAt <= 30 dias atrás (sem novos resultados há > 30 dias)
+    // 2) Nunca houve novidades (lastContentChangedAt é null) e a criação (createdAt) ocorreu há mais de 30 dias (sem resultados há > 30 dias)
+    const expiredPages = await MonitoredPage.findAll({
+      where: {
+        [Op.or]: [
+          {
+            lastContentChangedAt: {
+              [Op.ne]: null,
+              [Op.lte]: cutoffDate
+            }
+          },
+          {
+            lastContentChangedAt: null,
+            createdAt: {
+              [Op.lte]: cutoffDate
+            }
+          }
+        ]
+      }
+    });
+
+    if (expiredPages.length === 0) {
+      return { deletedCount: 0, deletedPages: [] };
+    }
+
+    console.log(`[MonitoredPagesCleanup] ${expiredPages.length} página(s) identificada(s) há mais de ${days} dias sem resultados ou novos resultados. Removendo do banco de dados...`);
+
+    const deletedPages = [];
+    for (const page of expiredPages) {
+      const pageData = {
+        id: page.id,
+        title: page.title,
+        url: page.url,
+        torrentsCount: page.torrentsCount,
+        lastContentChangedAt: page.lastContentChangedAt,
+        createdAt: page.createdAt
+      };
+      await page.destroy();
+      deletedPages.push(pageData);
+      console.log(`[MonitoredPagesCleanup] Página ID ${pageData.id} ("${pageData.title}") apagada por estar há mais de ${days} dias sem resultados/novos resultados.`);
+    }
+
+    return { deletedCount: deletedPages.length, deletedPages };
+  } catch (err) {
+    console.error('[MonitoredPagesCleanup] Erro ao remover páginas monitoradas inativas:', err.message);
+    return { deletedCount: 0, error: err.message };
+  }
+}
+
 // Listar todas as páginas monitoradas (ordenadas por recência de adição de torrents / data de alteração de conteúdo)
 app.get('/api/monitored-pages', async (req, res) => {
   try {
+    // Limpa automaticamente páginas a mais de 30 dias sem resultados ou novos resultados
+    await cleanupInactiveMonitoredPages(30);
+
     const pages = await MonitoredPage.findAll({
       order: [
         [sequelize.fn('COALESCE', sequelize.col('lastContentChangedAt'), sequelize.col('createdAt')), 'DESC'],
@@ -1639,6 +1698,9 @@ async function verifySingleMonitoredPage(page, client = null) {
     }
 
     // 4. Determina mensagem amigável e status do resultado
+    const previousCount = page.torrentsCount || 0;
+    const hasNewTorrents = addedCount > 0 || (totalFound > previousCount) || (!page.lastContentChangedAt && totalFound > 0);
+
     if (addedCount > 0) {
       statusMessage = `${addedCount} novo(s) torrent(s) adicionado(s) (${totalFound} na página)`;
       page.torrentsCount = totalFound;
@@ -1646,8 +1708,12 @@ async function verifySingleMonitoredPage(page, client = null) {
     } else if (totalFound > 0) {
       statusMessage = `Nenhum novo torrent (${totalFound} na página)`;
       page.torrentsCount = totalFound;
+      if (hasNewTorrents) {
+        page.lastContentChangedAt = new Date();
+      }
     } else {
       statusMessage = 'Nenhum torrent encontrado na página';
+      page.torrentsCount = 0;
     }
 
     page.lastCheckedAt = new Date();
@@ -1727,6 +1793,17 @@ app.delete('/api/monitored-pages/:id', async (req, res) => {
     }
     await page.destroy();
     res.json({ success: true, id: Number(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Limpeza manual de páginas com mais de 30 dias sem resultados ou novos resultados
+app.post('/api/monitored-pages/cleanup', async (req, res) => {
+  try {
+    const days = parseInt(req.body && req.body.days, 10) || 30;
+    const result = await cleanupInactiveMonitoredPages(days);
+    res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2470,6 +2547,9 @@ app.delete('/api/storage/delete', async (req, res) => {
 async function checkMonitoredPagesTask() {
   console.log('[MonitoredPages] Iniciando verificação sequencial manual de todas as páginas monitoradas...');
   try {
+    // Limpa páginas com mais de 30 dias sem resultados ou novidades antes de iniciar a checagem geral
+    await cleanupInactiveMonitoredPages(30);
+
     const pages = await MonitoredPage.findAll({
       where: { monitor: true },
       order: [
@@ -2513,8 +2593,8 @@ async function checkMonitoredPagesTask() {
 }
 
 // =========================================================================
-// WORKER LEVE DE VERIFICAÇÃO PERIÓDICA DE PÁGINAS MONITORADAS (CICLO DE 12H)
-// Executado a cada 5 minutos, verifica páginas com mais de 12 horas sem checagem
+// WORKER EM SEGUNDO PLANO DE PÁGINAS MONITORADAS
+// Executado 5 minutos após o início e periodicamente a cada 12 horas
 // =========================================================================
 let isMonitoredWorkerRunning = false;
 
@@ -2526,17 +2606,13 @@ async function runMonitoredPagesWorker() {
 
   isMonitoredWorkerRunning = true;
   try {
-    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
-    const { Op } = require('sequelize');
+    // Remove automaticamente páginas há mais de 30 dias sem resultados ou novos resultados
+    await cleanupInactiveMonitoredPages(30);
 
-    // Busca apenas páginas com monitoramento ativo que nunca foram checadas ou cuja última checagem foi há mais de 12 horas
+    // Busca todas as páginas com monitoramento ativo (ordenadas pelas que foram checadas há mais tempo)
     const pendingPages = await MonitoredPage.findAll({
       where: {
-        monitor: true,
-        [Op.or]: [
-          { lastCheckedAt: null },
-          { lastCheckedAt: { [Op.lte]: twelveHoursAgo } }
-        ]
+        monitor: true
       },
       order: [
         [sequelize.fn('COALESCE', sequelize.col('lastCheckedAt'), new Date(0)), 'ASC']
@@ -2544,11 +2620,11 @@ async function runMonitoredPagesWorker() {
     });
 
     if (pendingPages.length === 0) {
-      // Muito leve: encerra imediatamente sem gastar processamento nem memória
+      // Muito leve: encerra imediatamente se não houver páginas ativas
       return;
     }
 
-    console.log(`[MonitoredPagesWorker] Encontrada(s) ${pendingPages.length} página(s) pendente(s) (>12h). Iniciando verificação leve em segundo plano...`);
+    console.log(`[MonitoredPagesWorker] Encontrada(s) ${pendingPages.length} página(s) ativa(s) para o ciclo de 12h. Iniciando verificação leve em segundo plano...`);
     const client = await getDelugeClient().catch(() => null);
     let addedTotal = 0;
 
@@ -2567,7 +2643,7 @@ async function runMonitoredPagesWorker() {
     if (addedTotal > 0) {
       await invalidateCache('deluge_torrents');
     }
-    console.log(`[MonitoredPagesWorker] Ciclo concluído. ${pendingPages.length} página(s) checada(s), ${addedTotal} novo(s) torrent(s) adicionado(s).`);
+    console.log(`[MonitoredPagesWorker] Ciclo de 12h concluído. ${pendingPages.length} página(s) checada(s), ${addedTotal} novo(s) torrent(s) adicionado(s).`);
   } catch (err) {
     console.error('[MonitoredPagesWorker] Erro durante o ciclo do worker:', err.message);
   } finally {
@@ -2678,14 +2754,18 @@ liberarPortaServidor().catch(err => {
         writeStorageLog(`[Startup] Erro na verificação inicial de armazenamento: ${err.message}`);
       });
       startStorageGuardian();
+      // Executa a limpeza preventiva de páginas monitoradas há mais de 30 dias sem resultados
+      cleanupInactiveMonitoredPages(30).catch(err => {
+        console.error('[Startup] Erro na limpeza inicial de páginas monitoradas:', err.message);
+      });
     }, 3000); // 3 segundos após boot
 
-    // Inicia o worker leve de páginas monitoradas com timer inicial de 5 minutos (para não travar a inicialização)
-    // A partir daí, a cada 5 minutos verifica no banco se há páginas que ultrapassaram o prazo de 12 horas
-    const INITIAL_MONITOR_DELAY_MS = 5 * 60 * 1000; // 5 minutos
-    const MONITOR_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos
+    // Inicia o worker em segundo plano de páginas monitoradas:
+    // 1º disparo 5 minutos após o início e repetição a cada 12 horas
+    const INITIAL_MONITOR_DELAY_MS = 5 * 60 * 1000; // 5 minutos após o início
+    const MONITOR_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000; // a cada 12 horas
 
-    console.log('[Startup] Worker de páginas monitoradas agendado: primeiro disparo em 5 minutos, repetição a cada 5 minutos.');
+    console.log('[Startup] Worker de páginas monitoradas agendado: primeiro disparo em 5 minutos após o início e repetição a cada 12 horas.');
     setTimeout(() => {
       runMonitoredPagesWorker().catch(err => {
         console.error('[MonitoredPagesWorker] Erro no disparo inicial:', err.message);
