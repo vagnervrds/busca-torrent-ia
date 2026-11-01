@@ -419,6 +419,35 @@ async function initDatabase() {
   } catch (sfErr) {
     console.error('Erro ao verificar fonte StarckFilmesBR:', sfErr.message);
   }
+
+  // Garante a existência da fonte AnimesTorrents
+  try {
+    const animeSource = await SearchSource.findOne({
+      where: {
+        [Op.or]: [
+          { url: { [Op.like]: '%animestorrents%' } },
+          { name: { [Op.like]: '%animestorrents%' } }
+        ]
+      }
+    });
+    if (!animeSource) {
+      await SearchSource.create({
+        name: 'AnimesTorrents',
+        url: 'https://www.animestorrents.com/',
+        searchUrlPattern: 'https://www.animestorrents.com/?s={query}',
+        description: 'Torrents de animes em alta definição, episódios semanais e temporadas completas.',
+        contentTypes: JSON.stringify(['series', 'movies', 'music']),
+        isActive: true
+      });
+    } else if (animeSource.url !== 'https://www.animestorrents.com/') {
+      animeSource.url = 'https://www.animestorrents.com/';
+      animeSource.searchUrlPattern = 'https://www.animestorrents.com/?s={query}';
+      animeSource.name = 'AnimesTorrents';
+      await animeSource.save();
+    }
+  } catch (atErr) {
+    console.error('Erro ao verificar fonte AnimesTorrents:', atErr.message);
+  }
 }
 
 module.exports = {
