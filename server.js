@@ -7,6 +7,7 @@ const { enqueueSearch, stopSearchAgent, stopAllSearchAgents, testConnection, ana
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const { DelugeClient } = require('./gerenciar_deluge');
 const { relayService } = require('./relay_service');
+const { extractMagnetsFromHtml, resolveAjaxMagnetsFromHtml, extractMagnetsInPuppeteerPage } = require('./magnet_extractor');
 
 const { exec } = require('child_process');
 const util = require('util');
@@ -1182,69 +1183,8 @@ function extractMagnetTitle(magnet, linkText = '', pageTitle = '') {
 }
 
 // Extrai TODOS os magnet links e títulos de uma string HTML ou texto
-function extractAllTorrentsFromHtml(htmlOrText) {
-  const resultsMap = new Map(); // magnet -> title
-  if (!htmlOrText) return resultsMap;
-
-  const pageTitle = extractPageTitle(htmlOrText);
-
-  // Decodifica entidades HTML e URL-encoded magnets (magnet%3A%3F -> magnet:?)
-  let decoded = htmlOrText
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-
-  decoded = decoded.replace(/magnet%3A%3F/gi, 'magnet:?');
-
-  let optionCounter = 1;
-
-  // 1. Regex ampla para capturar tags <a> contendo magnet links (suporta multilinha com [\s\S]*?)
-  const aTagRegex = /<a\s+[^>]*href=["']?([^"' >]*magnet:\?xt=urn:[^"' >]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-  while ((match = aTagRegex.exec(decoded)) !== null) {
-    const fullUrl = match[1];
-    const linkText = match[2];
-
-    const innerMagnetMatch = fullUrl.match(/magnet:\?xt=urn:[^\s"'<>]+/i);
-    if (innerMagnetMatch) {
-      let mag = innerMagnetMatch[0];
-      try { mag = decodeURIComponent(mag); } catch (e) {}
-      mag = mag.trim();
-
-      if (!resultsMap.has(mag)) {
-        let title = extractMagnetTitle(mag, linkText, pageTitle);
-        const existingTitles = Array.from(resultsMap.values());
-        if (existingTitles.includes(title)) {
-          title = `${title} (Opção ${optionCounter})`;
-        }
-        optionCounter++;
-        resultsMap.set(mag, title);
-      }
-    }
-  }
-
-  // 2. Captura qualquer outro magnet link solto no texto/HTML
-  const globalMagnetRegex = /magnet:\?xt=urn:[^\s"'<>]+/gi;
-  let standaloneMatch;
-  while ((standaloneMatch = globalMagnetRegex.exec(decoded)) !== null) {
-    let mag = standaloneMatch[0];
-    try { mag = decodeURIComponent(mag); } catch (e) {}
-    mag = mag.trim();
-
-    if (!resultsMap.has(mag)) {
-      let title = extractMagnetTitle(mag, '', pageTitle);
-      const existingTitles = Array.from(resultsMap.values());
-      if (existingTitles.includes(title)) {
-        title = `${title} (Opção ${optionCounter})`;
-      }
-      optionCounter++;
-      resultsMap.set(mag, title);
-    }
-  }
-
-  return resultsMap;
+function extractAllTorrentsFromHtml(htmlOrText, pageUrl = '') {
+  return extractMagnetsFromHtml(htmlOrText, pageUrl);
 }
 
 // Helper para normalizar URLs preservando barras e caminhos exatos
@@ -1340,11 +1280,21 @@ app.post('/api/deluge/add-url', async (req, res) => {
       html = fetchResult.html;
 
       if (html) {
-        const pageTorrents = extractAllTorrentsFromHtml(html);
+        const pageTorrents = extractAllTorrentsFromHtml(html, workingUrl);
         pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+
+        // Resolução AJAX de downloads protegidos (ex: Tema Orion SOP / StarckFilmes / Comando)
+        if (magnetsFoundMap.size === 0) {
+          try {
+            const ajaxTorrents = await resolveAjaxMagnetsFromHtml(html, workingUrl);
+            ajaxTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+          } catch (ajaxErr) {
+            console.error('Erro ao resolver AJAX magnets a partir do HTML:', ajaxErr.message);
+          }
+        }
       }
 
-      // 3. Se nenhum magnet link foi encontrado via Fetch simples (ex: renderização por JS / protetores de link), usa Puppeteer como fallback
+      // 3. Se nenhum magnet link foi encontrado via Fetch simples / AJAX, usa Puppeteer com extração inteligente
       if (magnetsFoundMap.size === 0) {
         try {
           const puppeteer = require('puppeteer-extra');
@@ -1356,14 +1306,21 @@ app.post('/api/deluge/add-url', async (req, res) => {
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
           });
           const page = await browser.newPage();
-          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-          await page.goto(workingUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+          await page.goto(workingUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
           await new Promise(r => setTimeout(r, 2000));
-          renderedHtml = await page.content();
-          await browser.close();
 
-          const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
-          pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+          // Executa extração multi-estratégia dentro da página viva (Orion, data-attributes, cliques, scripts)
+          const pupMagnets = await extractMagnetsInPuppeteerPage(page);
+          pupMagnets.forEach(m => magnetsFoundMap.set(m.href, m.displayName));
+
+          if (magnetsFoundMap.size === 0) {
+            renderedHtml = await page.content();
+            const pupTorrents = extractAllTorrentsFromHtml(renderedHtml, workingUrl);
+            pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+          }
+
+          await browser.close();
         } catch (pupErr) {
           console.error('Erro ao usar Puppeteer como fallback para extrair magnets:', pupErr.message);
         }
@@ -1625,8 +1582,17 @@ async function verifySingleMonitoredPage(page, client = null) {
     let html = fetchResult.html;
 
     if (html) {
-      const pageTorrents = extractAllTorrentsFromHtml(html);
+      const pageTorrents = extractAllTorrentsFromHtml(html, page.url);
       pageTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+
+      // Resolução AJAX (ex: Tema Orion / StarckFilmes)
+      if (magnetsFoundMap.size === 0) {
+        try {
+          const ajaxTorrents = await resolveAjaxMagnetsFromHtml(html, page.url);
+          ajaxTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+        } catch (ajaxErr) {}
+      }
+
       const pTitle = extractPageTitle(html);
       if (pTitle && (!page.title || page.title === 'Página sem título' || page.title === 'Página de Torrent')) {
         page.title = pTitle;
@@ -1655,13 +1621,19 @@ async function verifySingleMonitoredPage(page, client = null) {
           ]
         });
         const pPage = await browser.newPage();
-        await pPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await pPage.goto(page.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await pPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+        await pPage.goto(page.url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
         await new Promise(r => setTimeout(r, 2000));
-        const renderedHtml = await pPage.content();
 
-        const pupTorrents = extractAllTorrentsFromHtml(renderedHtml);
-        pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+        // Extrai magnets dinâmicos in-browser
+        const pupMagnets = await extractMagnetsInPuppeteerPage(pPage);
+        pupMagnets.forEach(m => magnetsFoundMap.set(m.href, m.displayName));
+
+        if (magnetsFoundMap.size === 0) {
+          const renderedHtml = await pPage.content();
+          const pupTorrents = extractAllTorrentsFromHtml(renderedHtml, page.url);
+          pupTorrents.forEach((title, mag) => magnetsFoundMap.set(mag, title));
+        }
         const pTitle = extractPageTitle(renderedHtml);
         if (pTitle && (!page.title || page.title === 'Página sem título' || page.title === 'Página de Torrent')) {
           page.title = pTitle;

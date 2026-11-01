@@ -3,6 +3,7 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
 const { Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource } = require('./database');
+const { extractMagnetsInPuppeteerPage } = require('./magnet_extractor');
 
 // Habilita o plugin stealth para evitar detecção de robô
 puppeteer.use(StealthPlugin());
@@ -1182,31 +1183,20 @@ ${isSomenteDublado ? 'ATENÇÃO REQUISITO DE ÁUDIO ("Dublado / Português"): O 
                     files = Array.from(filesEl.querySelectorAll('li, td')).map(li => li.innerText.trim());
                   }
                   
-                  const magnetElements = Array.from(document.querySelectorAll('a[href^="magnet:"]'));
-                  const extractedMagnets = magnetElements.map((a, idx) => {
-                    const href = a.getAttribute('href') || '';
-                    let displayName = '';
-                    try {
-                      const dnMatch = href.match(/[?&]dn=([^&]+)/);
-                      if (dnMatch) {
-                        displayName = decodeURIComponent(dnMatch[1].replace(/\+/g, ' '));
-                      }
-                    } catch (e) {}
-                    return {
-                      index: idx,
-                      linkText: a.innerText.trim(),
-                      parentText: a.parentElement ? a.parentElement.innerText.substring(0, 150).replace(/\s+/g, ' ').trim() : '',
-                      href,
-                      displayName
-                    };
-                  });
-                  
                   return {
                     description: descEl ? descEl.innerText.trim() : 'Nenhuma descrição.',
                     files: files.slice(0, 60),
-                    extractedMagnets
+                    extractedMagnets: []
                   };
                 });
+
+                // Extração inteligente e multi-estratégia de magnets (suporta Orion SOP/StarckFilmes, data-attributes, Base64 e cliques)
+                try {
+                  detailData.extractedMagnets = await extractMagnetsInPuppeteerPage(page);
+                } catch (extErr) {
+                  console.error(`[DeepInspection] Erro ao extrair magnets da página:`, extErr.message);
+                  detailData.extractedMagnets = [];
+                }
               }
               
               let magnetsToEvaluate = detailData.extractedMagnets || [];

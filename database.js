@@ -1,4 +1,4 @@
-const { Sequelize, DataTypes } = require('sequelize');
+const { Sequelize, DataTypes, Op } = require('sequelize');
 const path = require('path');
 
 // Inicializa o banco de dados SQLite
@@ -389,6 +389,35 @@ async function initDatabase() {
       contentTypes: JSON.stringify(['series', 'movies', 'music']),
       isActive: true
     });
+  }
+
+  // Garante a existência da fonte StarckFilmesBR
+  try {
+    const starckSource = await SearchSource.findOne({
+      where: {
+        [Op.or]: [
+          { url: { [Op.like]: '%starckfilmes%' } },
+          { name: { [Op.like]: '%starck%' } }
+        ]
+      }
+    });
+    if (!starckSource) {
+      await SearchSource.create({
+        name: 'StarckFilmesBR',
+        url: 'https://starckfilmesbr.com/',
+        searchUrlPattern: 'https://starckfilmesbr.com/?s={query}',
+        description: 'Filmes e séries em torrent dublados e legendados em alta definição.',
+        contentTypes: JSON.stringify(['movies', 'series']),
+        isActive: true
+      });
+    } else if (starckSource.url !== 'https://starckfilmesbr.com/') {
+      starckSource.url = 'https://starckfilmesbr.com/';
+      starckSource.searchUrlPattern = 'https://starckfilmesbr.com/?s={query}';
+      starckSource.name = 'StarckFilmesBR';
+      await starckSource.save();
+    }
+  } catch (sfErr) {
+    console.error('Erro ao verificar fonte StarckFilmesBR:', sfErr.message);
   }
 }
 
