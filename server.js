@@ -632,7 +632,7 @@ app.post('/api/sources/import', async (req, res) => {
 
 // 3. Iniciar nova busca
 app.post('/api/search', async (req, res) => {
-  const { query } = req.body;
+  const { query, initialSource } = req.body;
   if (!query || !query.trim()) {
     return res.status(400).json({ error: 'A consulta de busca é obrigatória.' });
   }
@@ -640,6 +640,7 @@ app.post('/api/search', async (req, res) => {
   try {
     const search = await Search.create({
       query: query.trim(),
+      initialSource: initialSource ? String(initialSource).trim() : null,
       status: 'pending'
     });
 

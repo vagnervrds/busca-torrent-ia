@@ -67,6 +67,8 @@ const searchForm = document.getElementById('searchForm');
 
 const queryInput = document.getElementById('queryInput');
 
+const initialSourceSelect = document.getElementById('initialSourceSelect');
+
 const exampleBtns = document.querySelectorAll('.example-btn');
 
 const settingsForm = document.getElementById('settingsForm');
@@ -185,6 +187,8 @@ const activeSearchDate = document.getElementById('activeSearchDate');
 const activeSearchStatusBadge = document.getElementById('activeSearchStatusBadge');
 
 const activeSearchMetaBadge = document.getElementById('activeSearchMetaBadge');
+
+const activeSearchInitialSourceBadge = document.getElementById('activeSearchInitialSourceBadge');
 
 const terminalLogs = document.getElementById('terminalLogs');
 
@@ -372,9 +376,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
 
-  // Carrega buscas iniciais
+  // Carrega buscas e fontes iniciais
 
   fetchSearches();
+  fetchSources();
   connectGlobalSSE();
 
   checkDelugeStatus();
@@ -780,6 +785,7 @@ function showNewSearchForm() {
   activeSearchQueryTitle.innerText = "Nova Busca Inteligente";
 
   queryInput.value = '';
+  if (initialSourceSelect) initialSourceSelect.value = '';
 
   
 
@@ -1580,6 +1586,7 @@ async function fetchSources() {
     searchSources = await res.json();
 
     renderSourcesTable();
+    populateInitialSourceSelect();
 
   } catch (err) {
 
@@ -1587,6 +1594,27 @@ async function fetchSources() {
 
   }
 
+}
+
+// Preenche o campo de seleção de site inicial no formulário de busca
+function populateInitialSourceSelect() {
+  const select = document.getElementById('initialSourceSelect');
+  if (!select) return;
+
+  const currentVal = select.value;
+  select.innerHTML = '<option value="">Automático (O modelo de IA analisa e ordena os sites com maior probabilidade)</option>';
+
+  const activeSources = (searchSources || []).filter(s => s.isActive);
+  activeSources.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = `${s.name} (${s.url})`;
+    select.appendChild(opt);
+  });
+
+  if (currentVal && activeSources.some(s => String(s.id) === String(currentVal))) {
+    select.value = currentVal;
+  }
 }
 
 function renderSourcesTable() {
@@ -2240,6 +2268,18 @@ async function selectSearch(id) {
 
     updateActiveSearchMetaUI(searchData.type, searchData.episodesCount);
 
+    if (activeSearchInitialSourceBadge) {
+      if (searchData.initialSource) {
+        const src = (searchSources || []).find(s => String(s.id) === String(searchData.initialSource) || s.name.toLowerCase() === String(searchData.initialSource).toLowerCase());
+        const srcName = src ? src.name : searchData.initialSource;
+        activeSearchInitialSourceBadge.innerHTML = `<i class="ph-bold ph-globe-hemisphere-west mr-1"></i> Início: ${srcName}`;
+        activeSearchInitialSourceBadge.classList.remove('hidden');
+      } else {
+        activeSearchInitialSourceBadge.innerHTML = `<i class="ph-bold ph-sparkle mr-1"></i> Início: Automático (IA)`;
+        activeSearchInitialSourceBadge.classList.remove('hidden');
+      }
+    }
+
     
 
     renderLogs();
@@ -2291,6 +2331,8 @@ async function handleSearchSubmit(e) {
   const query = queryInput.value.trim();
   if (!query) return;
 
+  const initialSource = initialSourceSelect ? initialSourceSelect.value : '';
+
   const submitBtn = searchForm.querySelector('button[type="submit"]');
   if (submitBtn) {
     if (submitBtn.disabled) return;
@@ -2303,7 +2345,7 @@ async function handleSearchSubmit(e) {
     const res = await fetch('/api/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query })
+      body: JSON.stringify({ query, initialSource })
     });
     
     if (!res.ok) throw new Error("Falha ao criar busca");
@@ -2316,7 +2358,8 @@ async function handleSearchSubmit(e) {
     localStorage.setItem('cached_searches', JSON.stringify(searches));
     
     selectSearch(newSearch.id);
-    queryInput.value = ''; // limpa o input
+    queryInput.value = '';
+    if (initialSourceSelect) initialSourceSelect.value = ''; // limpa o input
   } catch (err) {
     await alert("Erro: " + err.message);
   } finally {

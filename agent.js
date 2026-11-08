@@ -767,8 +767,99 @@ async function runSearchAgent(searchId, resumeMode = true) {
       await logAgent(searchId, "Nenhuma fonte correspondente restrita encontrada. Buscando em todas as fontes ativas.", "warn");
       selectedSources = activeSources;
     }
-    
-    await logAgent(searchId, `Fontes de busca ativadas: ${selectedSources.map(s => s.name).join(', ')}`, 'info');
+
+    // Passo 1.5: Priorização e Ordenação Inteligente dos Sites de Busca
+    let userChosenSource = null;
+    if (search.initialSource && String(search.initialSource).trim() !== '') {
+      const initVal = String(search.initialSource).trim();
+      userChosenSource = activeSources.find(s => 
+        String(s.id) === initVal || 
+        s.name.toLowerCase() === initVal.toLowerCase() ||
+        s.url.toLowerCase().includes(initVal.toLowerCase())
+      );
+      if (userChosenSource) {
+        // Se o site escolhido não estiver nas fontes filtradas, adiciona-o para garantir que será pesquisado
+        if (!selectedSources.some(s => s.id === userChosenSource.id)) {
+          selectedSources.push(userChosenSource);
+        }
+      }
+    }
+
+    // Passa a lista de sites registrados para a IA analisar e ordenar pela maior probabilidade de resultados
+    if (selectedSources.length > 1) {
+      try {
+        if (token.stopped) throw new Error('SEARCH_STOPPED');
+        await logAgent(searchId, "IA analisando a lista de sites registrados para ordenar por probabilidade de resultados...", "info");
+
+        const sourcesSummary = selectedSources.map(s => {
+          let types = [];
+          try { types = JSON.parse(s.contentTypes); } catch (e) { types = [s.contentTypes]; }
+          return `- ID: ${s.id} | Nome: "${s.name}" | URL: ${s.url} | Tipos: [${types.join(', ')}] | Descrição: ${s.description || 'Sem descrição'}`;
+        }).join('\n');
+
+        const sitePrioritizationPrompt = [
+          {
+            role: "system",
+            content: "Você é um especialista em busca de torrents e indexadores. Seu objetivo é analisar a consulta de busca do usuário e ordenar os sites indexadores disponíveis em ordem decrescente de probabilidade de encontrar o conteúdo desejado (do mais provável para o menos provável)."
+          },
+          {
+            role: "user",
+            content: `Consulta do Usuário: "${search.query}"
+Categoria identificada: "${queryCategory}"
+
+Sites Registrados para Rastreamento:
+${sourcesSummary}
+
+Analise os pontos fortes e o foco de cada site (ex: sites nacionais/dublados em português vs sites asiáticos/originais vs catálogo geral de filmes/séries) e avalie qual site tem mais chance de ter o conteúdo solicitado pelo usuário.
+
+Ordene os IDs dos sites do MAIS PROVÁVEL para o MENOS PROVÁVEL.
+Responda APENAS com um objeto JSON no formato exato:
+{
+  "orderedSourceIds": [id1, id2, ...],
+  "reason": "Explicação resumida em uma frase justificando a escolha do primeiro site"
+}`
+          }
+        ];
+
+        const prioResult = await callLLM(searchId, sitePrioritizationPrompt, true);
+        if (prioResult && Array.isArray(prioResult.orderedSourceIds) && prioResult.orderedSourceIds.length > 0) {
+          const map = new Map(selectedSources.map(s => [s.id, s]));
+          const reordered = [];
+          for (const sid of prioResult.orderedSourceIds) {
+            const found = map.get(Number(sid));
+            if (found && !reordered.some(r => r.id === found.id)) {
+              reordered.push(found);
+            }
+          }
+          // Garante que nenhuma fonte selecionada fique de fora
+          for (const s of selectedSources) {
+            if (!reordered.some(r => r.id === s.id)) {
+              reordered.push(s);
+            }
+          }
+          selectedSources = reordered;
+          if (prioResult.reason) {
+            await logAgent(searchId, `Estratégia de priorização da IA: ${prioResult.reason}`, "info");
+          }
+        }
+      } catch (err) {
+        if (err.message === 'SEARCH_STOPPED') throw err;
+        await logAgent(searchId, `Aviso ao ordenar sites via IA: ${err.message}. Mantendo ordem padrão.`, "warn");
+      }
+    }
+
+    // Se o usuário selecionou um site inicial manualmente, coloca-o obrigatoriamente na 1ª posição
+    if (userChosenSource) {
+      selectedSources = [
+        userChosenSource,
+        ...selectedSources.filter(s => s.id !== userChosenSource.id)
+      ];
+      await logAgent(searchId, `Site inicial definido pelo usuário: "${userChosenSource.name}". As buscas começarão prioritariamente por este site.`, "info");
+    } else {
+      await logAgent(searchId, `Modo Automático: O modelo de IA decidiu a ordem de início das buscas.`, "info");
+    }
+
+    await logAgent(searchId, `Ordem de busca dos sites: ${selectedSources.map(s => s.name).join(' ➔ ')}`, 'info');
     
     // Passo 2: LLM sugere palavras-chave otimizadas
     const keywordAnalysisPrompt = [

@@ -88,6 +88,11 @@ const Search = sequelize.define('Search', {
     type: DataTypes.FLOAT,
     allowNull: false,
     defaultValue: 0.0
+  },
+  initialSource: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: null
   }
 });
 
@@ -305,6 +310,17 @@ async function initDatabase() {
     });
   } catch (e) {
     // A coluna já existe ou a tabela foi criada agora por sync()
+  }
+
+  // Garante a presença da coluna initialSource na tabela Searches
+  try {
+    await sequelize.getQueryInterface().addColumn('Searches', 'initialSource', {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null
+    });
+  } catch (e) {
+    // A coluna já existe
   }
   
   // Cria tabela de cache SWR se não existir (compatibilidade com bancos existentes)
