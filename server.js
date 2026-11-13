@@ -1,7 +1,7 @@
 require('./logger');
 const express = require('express');
 const path = require('path');
-const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry, MonitoredPage, sequelize } = require('./database');
+const { initDatabase, Search, TorrentResult, TorrentEvaluation, AgentLog, SystemSetting, SearchSource, CacheEntry, MonitoredPage, sequelize, cleanupExpiredCache } = require('./database');
 const { Op } = require('sequelize');
 const { enqueueSearch, stopSearchAgent, stopAllSearchAgents, testConnection, analyzeSearchSource, cancelSearchSourceAnalysis, analysisEvents } = require('./agent');
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
@@ -121,64 +121,123 @@ global.sseBroadcast = (searchId, eventData) => {
   });
 };
 
-// --- CACHE SWR (Stale-While-Revalidate) ---
-// Retorna dado em cache imediatamente (mesmo que velho) e revalida em background.
-// Isso garante que o frontend não fica travado esperando queries pesadas no DietPi.
+// --- CACHE SWR HÍBRIDO (L1 RAM + L2 SQLite Stale-While-Revalidate) ---
+// Otimizado especialmente para hardware modesto (1GB RAM e HD físico mecânico antigo).
+// - L1 (RAM): Mapa ultraleve em memória (< 1MB) para respostas em 0ms sem tocar o HD mecânico.
+// - L2 (SQLite): Persistência em disco mantida sob controle de tamanho (limite de entradas e TTL).
 const activeRevalidations = new Set();
+const l1MemoryCache = new Map(); // key -> { data, cachedAt: number, ttl: number }
+const MAX_L1_CACHE_ENTRIES = 80;
 
-async function withSWRCache(key, ttlSeconds, fetchFn) {
-  try {
-    const cached = await CacheEntry.findByPk(key);
-    
-    if (cached) {
-      const ageMs = Date.now() - new Date(cached.cachedAt).getTime();
-      const isStale = ageMs > cached.ttl * 1000;
-      
-      if (!isStale) {
-        // Cache válido: retorna direto sem revalidar
-        return JSON.parse(cached.data);
-      }
-      
-      // Cache stale: retorna imediatamente E revalida em background
-      const staleData = JSON.parse(cached.data);
-      
-      // Revalida de forma assíncrona (não bloqueia a resposta) se não houver revalidação ativa
-      if (!activeRevalidations.has(key)) {
-        activeRevalidations.add(key);
-        setImmediate(async () => {
-          try {
-            const freshData = await fetchFn();
+function setL1Cache(key, data, ttlSeconds) {
+  if (l1MemoryCache.size >= MAX_L1_CACHE_ENTRIES) {
+    const firstKey = l1MemoryCache.keys().next().value;
+    l1MemoryCache.delete(firstKey);
+  }
+  l1MemoryCache.set(key, {
+    data,
+    cachedAt: Date.now(),
+    ttl: ttlSeconds
+  });
+}
+
+async function withSWRCache(key, ttlSeconds, fetchFn, options = {}) {
+  const { persist = true } = options;
+
+  // 1. Tenta L1 em memória RAM (0ms, 0 I/O de disco)
+  const memCached = l1MemoryCache.get(key);
+  if (memCached) {
+    const ageMs = Date.now() - memCached.cachedAt;
+    const isStale = ageMs > memCached.ttl * 1000;
+
+    if (!isStale) {
+      return memCached.data;
+    }
+
+    // Cache L1 stale: retorna imediatamente da memória e revalida em segundo plano
+    if (!activeRevalidations.has(key)) {
+      activeRevalidations.add(key);
+      setImmediate(async () => {
+        try {
+          const freshData = await fetchFn();
+          setL1Cache(key, freshData, ttlSeconds);
+          if (persist) {
             await CacheEntry.upsert({
               key,
               data: JSON.stringify(freshData),
               cachedAt: new Date(),
               ttl: ttlSeconds
-            });
-          } catch (e) {
-            console.error(`[SWR Cache] Erro ao revalidar "${key}":`, e.message);
-          } finally {
-            activeRevalidations.delete(key);
+            }).catch(() => {});
           }
-        });
-      }
-      
-      return staleData;
+        } catch (e) {
+          console.error(`[SWR Cache] Erro ao revalidar "${key}":`, e.message);
+        } finally {
+          activeRevalidations.delete(key);
+        }
+      });
     }
-  } catch (e) {
-    console.error(`[SWR Cache] Erro ao ler cache "${key}":`, e.message);
+
+    return memCached.data;
   }
-  
-  // Cache miss: busca dado fresco, armazena e retorna
+
+  // 2. Se não estiver no L1, verifica se há no L2 (SQLite) se persist=true
+  if (persist) {
+    try {
+      const dbCached = await CacheEntry.findByPk(key);
+      if (dbCached) {
+        const parsed = JSON.parse(dbCached.data);
+        const ageMs = Date.now() - new Date(dbCached.cachedAt).getTime();
+        const isStale = ageMs > dbCached.ttl * 1000;
+
+        // Popula L1
+        setL1Cache(key, parsed, dbCached.ttl);
+
+        if (!isStale) {
+          return parsed;
+        }
+
+        // Cache L2 stale: retorna imediatamente e revalida em background
+        if (!activeRevalidations.has(key)) {
+          activeRevalidations.add(key);
+          setImmediate(async () => {
+            try {
+              const freshData = await fetchFn();
+              setL1Cache(key, freshData, ttlSeconds);
+              await CacheEntry.upsert({
+                key,
+                data: JSON.stringify(freshData),
+                cachedAt: new Date(),
+                ttl: ttlSeconds
+              }).catch(() => {});
+            } catch (e) {
+              console.error(`[SWR Cache] Erro ao revalidar "${key}":`, e.message);
+            } finally {
+              activeRevalidations.delete(key);
+            }
+          });
+        }
+
+        return parsed;
+      }
+    } catch (e) {
+      console.error(`[SWR Cache] Erro ao ler SQLite para "${key}":`, e.message);
+    }
+  }
+
+  // 3. Cache Miss: busca dado fresco
   const freshData = await fetchFn();
-  try {
-    await CacheEntry.upsert({
-      key,
-      data: JSON.stringify(freshData),
-      cachedAt: new Date(),
-      ttl: ttlSeconds
-    });
-  } catch (e) {
-    console.error(`[SWR Cache] Erro ao gravar cache "${key}":`, e.message);
+  setL1Cache(key, freshData, ttlSeconds);
+  if (persist) {
+    try {
+      await CacheEntry.upsert({
+        key,
+        data: JSON.stringify(freshData),
+        cachedAt: new Date(),
+        ttl: ttlSeconds
+      });
+    } catch (e) {
+      console.error(`[SWR Cache] Erro ao gravar cache "${key}":`, e.message);
+    }
   }
   return freshData;
 }
@@ -186,18 +245,28 @@ async function withSWRCache(key, ttlSeconds, fetchFn) {
 // Invalida uma ou mais entradas do cache SWR
 async function invalidateCache(...keys) {
   try {
+    for (const key of keys) {
+      const item = l1MemoryCache.get(key);
+      if (item) {
+        // Marca como expirado no L1 (0ms)
+        item.cachedAt = 0;
+      }
+    }
+
     const { Op } = require('sequelize');
-    // Em vez de destruir, marca como expirado (stale) alterando a data para 1970
-    // Isso garante que o cache antigo continue sendo entregue instantaneamente
-    // enquanto a revalidação ocorre em segundo plano (SWR puro).
     await CacheEntry.update(
       { cachedAt: new Date(0) },
       { where: { key: { [Op.in]: keys } } }
-    );
+    ).catch(() => {});
   } catch (e) {
-    // Não é crítico se falhar
+    // Não é crítico
   }
 }
+
+// Limpeza periódica do SQLite a cada 15 minutos para economizar espaço em disco
+setInterval(() => {
+  cleanupExpiredCache(50).catch(() => {});
+}, 15 * 60 * 1000);
 
 // --- ROTAS DA API ---
 
@@ -907,14 +976,14 @@ app.get('/api/sse/global', (req, res) => {
 // Retorna o status de conexão com o Deluge
 app.get('/api/deluge/status', async (req, res) => {
   try {
-    const data = await withSWRCache('deluge_status', 10, async () => {
+    const data = await withSWRCache('deluge_status', 8, async () => {
       await verificarDeluge();
       return {
         disponivel: delugeDisponivel,
         port: delugeCreds ? delugeCreds.delugeWeb.porta : null,
         error: delugeErro
       };
-    });
+    }, { persist: false });
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -936,11 +1005,11 @@ app.post('/api/deluge/test-connection', async (req, res) => {
 // Lista todos os torrents e seus status no Deluge
 app.get('/api/deluge/torrents', async (req, res) => {
   try {
-    const data = await withSWRCache('deluge_torrents', 5, async () => {
+    const data = await withSWRCache('deluge_torrents', 4, async () => {
       const client = await getDelugeClient();
       const torrents = await client.getStatus();
       return { success: true, torrents };
-    });
+    }, { persist: false });
     res.json(data);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -961,16 +1030,16 @@ app.get('/api/deluge/stream', async (req, res) => {
     isSending = true;
 
     try {
-      const statusData = await withSWRCache('deluge_status', 10, async () => {
+      const statusData = await withSWRCache('deluge_status', 8, async () => {
         await verificarDeluge();
         return {
           disponivel: delugeDisponivel,
           port: delugeCreds ? delugeCreds.delugeWeb.porta : null,
           error: delugeErro
         };
-      });
+      }, { persist: false });
 
-      const torrentsData = await withSWRCache('deluge_torrents', 5, async () => {
+      const torrentsData = await withSWRCache('deluge_torrents', 4, async () => {
         try {
           const client = await getDelugeClient();
           const torrents = await client.getStatus();
@@ -978,7 +1047,7 @@ app.get('/api/deluge/stream', async (req, res) => {
         } catch (err) {
           return { success: false, error: err.message };
         }
-      });
+      }, { persist: false });
 
       res.write(`data: ${JSON.stringify({ 
         disponivel: statusData.disponivel, 
@@ -995,8 +1064,8 @@ app.get('/api/deluge/stream', async (req, res) => {
   // Envia atualização inicial imediatamente
   await sendUpdate();
 
-  // Envia atualizações a cada 3 segundos
-  const intervalId = setInterval(sendUpdate, 3000);
+  // Envia atualizações a cada 4 segundos (economiza CPU/HD em hardware modesto)
+  const intervalId = setInterval(sendUpdate, 4000);
 
   req.on('close', () => {
     clearInterval(intervalId);
@@ -1496,9 +1565,6 @@ async function cleanupInactiveMonitoredPages(days = 30) {
 // Listar todas as páginas monitoradas (ordenadas por recência de adição de torrents / data de alteração de conteúdo)
 app.get('/api/monitored-pages', async (req, res) => {
   try {
-    // Limpa automaticamente páginas a mais de 30 dias sem resultados ou novos resultados
-    await cleanupInactiveMonitoredPages(30);
-
     const pages = await MonitoredPage.findAll({
       order: [
         [sequelize.fn('COALESCE', sequelize.col('lastContentChangedAt'), sequelize.col('createdAt')), 'DESC'],
@@ -1507,6 +1573,22 @@ app.get('/api/monitored-pages', async (req, res) => {
     });
     res.json({ success: true, pages });
   } catch (err) {
+    // Se ocorrer erro de índice inconsistente ou corrompido, executa REINDEX emergencial e re-tenta
+    if (err.message && err.message.includes('malformed')) {
+      try {
+        console.warn('[SQLite] Detectada anomalia no índice de MonitoredPages. Executando REINDEX emergencial...');
+        await sequelize.query('REINDEX MonitoredPages;');
+        const pagesRetry = await MonitoredPage.findAll({
+          order: [
+            [sequelize.fn('COALESCE', sequelize.col('lastContentChangedAt'), sequelize.col('createdAt')), 'DESC'],
+            ['id', 'DESC']
+          ]
+        });
+        return res.json({ success: true, pages: pagesRetry });
+      } catch (retryErr) {
+        console.error('[SQLite] Falha no REINDEX emergencial:', retryErr.message);
+      }
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1796,14 +1878,99 @@ app.post('/api/deluge/torrents/:id/pause', async (req, res) => {
   }
 });
 
-// Retoma um torrent pausado específico
+// Monitora em segundo plano torrents que ainda estão em estado 'Checking' após um force_recheck
+// para garantir que sejam retomados assim que a verificação terminar no Deluge
+const activeRecheckMonitors = new Set();
+function monitorTorrentRecheckAndResume(torrentId, maxAttempts = 45, intervalMs = 2000) {
+  if (!torrentId || activeRecheckMonitors.has(torrentId)) return;
+  activeRecheckMonitors.add(torrentId);
+
+  let attempts = 0;
+  const timer = setInterval(async () => {
+    attempts++;
+    try {
+      const client = await getDelugeClient().catch(() => null);
+      if (!client) {
+        if (attempts >= maxAttempts) {
+          clearInterval(timer);
+          activeRecheckMonitors.delete(torrentId);
+        }
+        return;
+      }
+
+      const t = await client.getTorrentStatus(torrentId, ['state', 'paused']).catch(() => null);
+      if (!t) {
+        clearInterval(timer);
+        activeRecheckMonitors.delete(torrentId);
+        return;
+      }
+
+      if (t.state === 'Checking' || t.state === 'Allocating') {
+        if (attempts >= maxAttempts) {
+          clearInterval(timer);
+          activeRecheckMonitors.delete(torrentId);
+        }
+        return;
+      }
+
+      // Saiu de Checking: garante que o torrent seja retomado e não fique pausado
+      if (t.paused || t.state === 'Paused' || t.state === 'Queued') {
+        await client.setTorrentOptions(torrentId, { auto_managed: true, stop_at_ratio: false }).catch(() => {});
+        await client.resume(torrentId).catch(() => {});
+      }
+      await invalidateCache('deluge_torrents');
+      clearInterval(timer);
+      activeRecheckMonitors.delete(torrentId);
+    } catch (e) {
+      if (attempts >= maxAttempts) {
+        clearInterval(timer);
+        activeRecheckMonitors.delete(torrentId);
+      }
+    }
+  }, intervalMs);
+}
+
+// Retoma um torrent pausado ou com problemas (ex: estado Error ou arquivos apagados do disco, reiniciando o download)
 app.post('/api/deluge/torrents/:id/resume', async (req, res) => {
   const { id } = req.params;
   try {
     const client = await getDelugeClient();
-    await client.resume(id);
-    await invalidateCache('deluge_torrents');
-    res.json({ success: true });
+    const downloadPath = await discoverDelugePath().catch(() => null);
+
+    let fallbackMagnet = null;
+    try {
+      const savedResult = await TorrentResult.findOne({
+        where: { magnetLink: { [Op.like]: `%${id}%` } },
+        attributes: ['magnetLink']
+      });
+      if (savedResult && savedResult.magnetLink) {
+        fallbackMagnet = savedResult.magnetLink;
+      }
+    } catch (dbErr) {}
+
+    const result = await client.smartResume(id, {
+      fallbackDownloadPath: downloadPath,
+      fallbackMagnet,
+      onBeforeRestart: async (torrent) => {
+        if (torrent && torrent.total_size > 0) {
+          await ensureDiskSpaceForTorrent(torrent.total_size);
+        }
+      }
+    });
+
+    if (result.stillChecking) {
+      monitorTorrentRecheckAndResume(id);
+    }
+
+    await invalidateCache('deluge_torrents', 'storage_tree');
+
+    const message = result.restarted
+      ? (result.filesMissing
+          ? 'Arquivos ausentes detectados: reverificação concluída e download reiniciado!'
+          : 'Problema corrigido no torrent: download reiniciado!')
+      : 'Download retomado com sucesso!';
+
+    res.json({ success: true, ...result, message });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2822,8 +2989,9 @@ liberarPortaServidor().catch(err => {
         }
 
         try {
+          await sequelize.query('PRAGMA wal_checkpoint(PASSIVE);').catch(() => {});
           await sequelize.close();
-          console.log('[Shutdown] Conexão SQLite encerrada.');
+          console.log('[Shutdown] Conexão SQLite encerrada com WAL checkpoint consolidado.');
         } catch (e) {}
 
         clearTimeout(forceTimer);

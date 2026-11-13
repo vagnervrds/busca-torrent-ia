@@ -29,7 +29,7 @@ async function getSettings() {
   });
   return {
     aiProvider: settings.aiProvider || 'openai',
-    aiUrl: settings.aiUrl || 'http://localhost:8045/v1',
+    aiUrl: settings.aiUrl || 'https://openrouter.ai/api/v1',
     aiToken: settings.aiToken || process.env.AI_TOKEN || '',
     aiModel: settings.aiModel || 'gemini-3-flash',
     preferredAudioLanguage: settings.preferredAudioLanguage || 'Português (Dublado)',

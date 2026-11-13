@@ -1,5 +1,7 @@
 const { obterCredenciaisDelugeLocal } = require('./obter_deluge_creds');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Gerenciador de Torrents do Deluge (Local)
@@ -111,15 +113,79 @@ class DelugeClient {
   }
 
   /**
-   * Obtém o status de todos os torrents ou de um específico
+   * Obtém o status de todos os torrents ou de um específico.
+   * Por padrão usa campos enxutos (sem 'files' e 'file_progress') para não sobrecarregar
+   * CPU, tráfego JSON e memória em ambientes com recursos limitados.
    */
-  async getStatus() {
-    const fields = [
-      'name', 'progress', 'state', 'total_size', 'files', 
+  async getStatus(fields = null) {
+    const defaultFields = [
+      'name', 'progress', 'state', 'total_size', 
       'paused', 'ratio', 'download_payload_rate', 'upload_payload_rate', 
-      'eta', 'num_peers', 'num_seeds', 'total_done', 'file_progress'
+      'eta', 'num_peers', 'num_seeds', 'total_done', 'save_path'
     ];
-    return this.request('core.get_torrents_status', [{}, fields]);
+    const torrents = await this.request('core.get_torrents_status', [{}, fields || defaultFields]);
+    if (torrents && typeof torrents === 'object') {
+      const checkedSaveDirs = new Map();
+      for (const id of Object.keys(torrents)) {
+        const t = torrents[id];
+        if (t && t.total_done > 0 && t.save_path && t.name) {
+          let dirExists = checkedSaveDirs.get(t.save_path);
+          if (dirExists === undefined) {
+            dirExists = fs.existsSync(t.save_path);
+            checkedSaveDirs.set(t.save_path, dirExists);
+          }
+          if (dirExists && !fs.existsSync(path.join(t.save_path, t.name))) {
+            t.filesMissing = true;
+          }
+        }
+      }
+    }
+    return torrents;
+  }
+
+  /**
+   * Obtém o status detalhado de um único torrent pelo ID
+   */
+  async getTorrentStatus(torrentId, fields = null) {
+    const defaultFields = [
+      'name', 'progress', 'state', 'total_size',
+      'paused', 'ratio', 'download_payload_rate', 'upload_payload_rate',
+      'eta', 'num_peers', 'num_seeds', 'total_done',
+      'save_path', 'download_location', 'files', 'file_progress', 'message', 'trackers'
+    ];
+    try {
+      const res = await this.request('core.get_torrent_status', [torrentId, fields || defaultFields]);
+      if (res && typeof res === 'object' && Object.keys(res).length > 0) {
+        return res;
+      }
+    } catch (e) {
+      // Fallback via get_torrents_status
+    }
+    const all = await this.request('core.get_torrents_status', [{ id: [torrentId] }, fields || defaultFields]);
+    return all ? all[torrentId] || null : null;
+  }
+
+  /**
+   * Força a reverificação (force_recheck) dos arquivos de um ou mais torrents no disco
+   */
+  async forceRecheck(torrentIds) {
+    const ids = Array.isArray(torrentIds) ? torrentIds : [torrentIds];
+    return this.request('core.force_recheck', [ids]);
+  }
+
+  /**
+   * Define opções para um ou mais torrents (ex: auto_managed, stop_at_ratio)
+   */
+  async setTorrentOptions(torrentIds, options = {}) {
+    const ids = Array.isArray(torrentIds) ? torrentIds : [torrentIds];
+    return this.request('core.set_torrent_options', [ids, options]);
+  }
+
+  /**
+   * Obtém o Magnet URI de um torrent presente na sessão do Deluge
+   */
+  async getMagnetUri(torrentId) {
+    return this.request('core.get_magnet_uri', [torrentId]);
   }
 
   /**
@@ -130,12 +196,221 @@ class DelugeClient {
     return this.request('core.pause_torrent', [ids]);
   }
 
+  async pauseTorrent(torrentId) {
+    return this.pause(torrentId);
+  }
+
   /**
    * Retoma (resume) um ou mais torrents pausados
    */
   async resume(torrentIds) {
     const ids = Array.isArray(torrentIds) ? torrentIds : [torrentIds];
     return this.request('core.resume_torrent', [ids]);
+  }
+
+  async resumeTorrent(torrentId) {
+    return this.smartResume(torrentId);
+  }
+
+  /**
+   * Verifica se os arquivos de um torrent que já possuía progresso foram apagados do disco
+   */
+  hasMissingFilesOnDisk(torrent, fallbackDownloadPath = null) {
+    if (!torrent) return false;
+    const hadProgress = (torrent.total_done && torrent.total_done > 0) || (torrent.progress && torrent.progress > 0);
+    if (!hadProgress) return false;
+
+    const saveDir = torrent.save_path || torrent.download_location || fallbackDownloadPath;
+    if (!saveDir || typeof saveDir !== 'string') return false;
+
+    // Se nem o diretório base existe localmente, verificamos se o diretório pai existe neste host
+    if (!fs.existsSync(saveDir)) {
+      const parentDir = path.dirname(saveDir);
+      if (parentDir && parentDir !== saveDir && fs.existsSync(parentDir)) {
+        return true;
+      }
+      return false;
+    }
+
+    // 1. Verifica pela lista de arquivos do torrent
+    if (Array.isArray(torrent.files) && torrent.files.length > 0) {
+      let anyExisting = false;
+      for (let i = 0; i < torrent.files.length; i++) {
+        const f = torrent.files[i];
+        if (!f || !f.path) continue;
+        const fullPath = path.join(saveDir, f.path);
+        const exists = fs.existsSync(fullPath);
+        if (exists) anyExisting = true;
+
+        const fProg = Array.isArray(torrent.file_progress) && torrent.file_progress[i] !== undefined
+          ? torrent.file_progress[i]
+          : (torrent.progress || 0) / 100;
+
+        // Se o Deluge acredita que o arquivo já tinha dados baixados mas ele não existe no disco
+        if (fProg > 0 && !exists) {
+          return true;
+        }
+      }
+      if (!anyExisting) {
+        return true;
+      }
+    } else if (torrent.name) {
+      // 2. Fallback pelo nome raiz do torrent
+      const rootPath = path.join(saveDir, torrent.name);
+      if (!fs.existsSync(rootPath)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Retoma um torrent resolvendo automaticamente problemas como estado de Erro
+   * ou arquivos apagados do disco (forçando recheck e reiniciando o download).
+   */
+  async smartResume(torrentId, options = {}) {
+    const { fallbackDownloadPath = null, fallbackMagnet = null, onBeforeRestart = null } = options;
+
+    const statusFields = [
+      'name', 'progress', 'state', 'total_size',
+      'paused', 'total_done', 'save_path', 'download_location',
+      'files', 'file_progress', 'message', 'trackers'
+    ];
+
+    let torrent = await this.getTorrentStatus(torrentId, statusFields).catch(() => null);
+    if (!torrent) {
+      // Caso não consiga ler status detalhado, tenta o resume direto
+      await this.resume(torrentId);
+      return { success: true, restarted: false, rechecked: false };
+    }
+
+    const isErrorState = torrent.state === 'Error' ||
+      Boolean(torrent.message && torrent.state !== 'Downloading' && torrent.state !== 'Seeding');
+    const filesMissing = this.hasMissingFilesOnDisk(torrent, fallbackDownloadPath);
+
+    let needsRecovery = isErrorState || filesMissing;
+
+    // Se aparentemente não há erro nem arquivos ausentes, tenta o resume normal primeiro
+    if (!needsRecovery) {
+      await this.setTorrentOptions(torrentId, { auto_managed: true }).catch(() => {});
+      await this.resume(torrentId);
+
+      // Aguarda brevemente para checar se o Deluge/libtorrent acusou erro de arquivo ao tentar retomar
+      await new Promise(r => setTimeout(r, 400));
+      const afterQuickResume = await this.getTorrentStatus(torrentId, [
+        'name', 'state', 'paused', 'progress', 'total_done', 'message'
+      ]).catch(() => null);
+
+      if (afterQuickResume && afterQuickResume.state === 'Error') {
+        needsRecovery = true;
+        torrent = { ...torrent, ...afterQuickResume };
+      } else {
+        return {
+          success: true,
+          restarted: false,
+          rechecked: false,
+          state: afterQuickResume ? afterQuickResume.state : torrent.state
+        };
+      }
+    }
+
+    // === FLUXO DE RECUPERAÇÃO E REINÍCIO DE DOWNLOAD ===
+    if (typeof onBeforeRestart === 'function') {
+      await onBeforeRestart(torrent).catch(() => {});
+    }
+
+    const saveDir = torrent.save_path || torrent.download_location || fallbackDownloadPath;
+    if (saveDir && !fs.existsSync(saveDir)) {
+      try {
+        const parentDir = path.dirname(saveDir);
+        if (parentDir && fs.existsSync(parentDir)) {
+          fs.mkdirSync(saveDir, { recursive: true });
+        }
+      } catch (mkdirErr) {}
+    }
+
+    // 1. Ajusta opções para garantir que o Deluge não mantenha o torrent pausado por ratio/fila
+    await this.setTorrentOptions(torrentId, { auto_managed: true, stop_at_ratio: false }).catch(() => {});
+
+    // 2. Chama resume antes do forceRecheck (para limpar flag is_paused se não estiver em Error)
+    await this.resume(torrentId).catch(() => {});
+
+    // 3. Força recheck no Deluge para limpar estado de Error e zerar progresso dos arquivos apagados
+    await this.forceRecheck(torrentId);
+
+    // 4. Chama resume logo em seguida
+    await this.resume(torrentId).catch(() => {});
+
+    // 5. Aguarda a conclusão do Checking (quando arquivos foram apagados, o recheck leva poucos ms)
+    // Como o Deluge salva `forcing_recheck_paused = True` quando o torrent estava em Error/Paused,
+    // ele pausa o torrent automaticamente ao terminar o `force_recheck`. Por isso, monitoramos o
+    // término do `Checking` e enviamos `resume` imediatamente após!
+    let finalStatus = null;
+    let finishedChecking = false;
+
+    for (let attempt = 0; attempt < 14; attempt++) {
+      await new Promise(r => setTimeout(r, 350));
+      finalStatus = await this.getTorrentStatus(torrentId, [
+        'name', 'state', 'paused', 'progress', 'total_size', 'total_done', 'message'
+      ]).catch(() => null);
+
+      if (!finalStatus) break;
+
+      if (finalStatus.state === 'Checking' || finalStatus.state === 'Allocating') {
+        continue;
+      }
+
+      finishedChecking = true;
+
+      if (finalStatus.paused || finalStatus.state === 'Paused' || finalStatus.state === 'Queued') {
+        await this.setTorrentOptions(torrentId, { auto_managed: true, stop_at_ratio: false }).catch(() => {});
+        await this.resume(torrentId).catch(() => {});
+        await new Promise(r => setTimeout(r, 300));
+        finalStatus = await this.getTorrentStatus(torrentId, [
+          'name', 'state', 'paused', 'progress', 'total_size', 'total_done', 'message'
+        ]).catch(() => finalStatus);
+      }
+      break;
+    }
+
+    // 6. Fallback definitivo: se mesmo após force_recheck + resume o torrent continuar em estado 'Error',
+    // recria o torrent na sessão a partir do seu Magnet URI para reiniciar o download do zero.
+    if (finalStatus && finalStatus.state === 'Error') {
+      let magnetUri = await this.getMagnetUri(torrentId).catch(() => null);
+      if (!magnetUri || typeof magnetUri !== 'string' || !magnetUri.startsWith('magnet:')) {
+        if (fallbackMagnet && fallbackMagnet.startsWith('magnet:')) {
+          magnetUri = fallbackMagnet;
+        } else if (/^[a-fA-F0-9]{40}$/.test(torrentId)) {
+          const dn = torrent.name ? `&dn=${encodeURIComponent(torrent.name)}` : '';
+          const trList = Array.isArray(torrent.trackers)
+            ? torrent.trackers.map(t => (t && t.url ? `&tr=${encodeURIComponent(t.url)}` : '')).join('')
+            : '';
+          magnetUri = `magnet:?xt=urn:btih:${torrentId}${dn}${trList}`;
+        }
+      }
+
+      if (magnetUri) {
+        await this.remove(torrentId, false).catch(() => {});
+        await new Promise(r => setTimeout(r, 250));
+        await this.addMagnet(magnetUri);
+        await this.setTorrentOptions(torrentId, { auto_managed: true, stop_at_ratio: false }).catch(() => {});
+        await this.resume(torrentId).catch(() => {});
+        finalStatus = await this.getTorrentStatus(torrentId, [
+          'name', 'state', 'paused', 'progress', 'total_size', 'total_done', 'message'
+        ]).catch(() => finalStatus);
+      }
+    }
+
+    return {
+      success: true,
+      restarted: true,
+      rechecked: true,
+      stillChecking: !finishedChecking && finalStatus && finalStatus.state === 'Checking',
+      filesMissing,
+      wasError: isErrorState,
+      state: finalStatus ? finalStatus.state : 'Downloading'
+    };
   }
 
   /**
@@ -145,6 +420,10 @@ class DelugeClient {
    */
   async remove(torrentId, removeData = false) {
     return this.request('core.remove_torrent', [torrentId, removeData]);
+  }
+
+  async removeTorrent(torrentId, removeData = false) {
+    return this.remove(torrentId, removeData);
   }
 
   /**
@@ -208,7 +487,11 @@ Uso do CLI Deluge Manager:
 
     // 3. Executa as operações do CLI
     if (cmd === 'status') {
-      const torrents = await client.getStatus();
+      const torrents = await client.getStatus([
+        'name', 'progress', 'state', 'total_size', 'files', 
+        'paused', 'ratio', 'download_payload_rate', 'upload_payload_rate', 
+        'eta', 'num_peers', 'num_seeds', 'total_done', 'file_progress'
+      ]);
       const ids = Object.keys(torrents);
 
       if (ids.length === 0) {
@@ -278,7 +561,9 @@ Uso do CLI Deluge Manager:
         idsToResume = Object.keys(torrents);
       }
       
-      await client.resume(idsToResume);
+      for (const id of idsToResume) {
+        await client.smartResume(id);
+      }
       console.log(`Operação de retomar concluída para: ${idsToResume.join(', ')}`);
     } 
     else if (cmd === 'remove' || cmd === 'delete') {

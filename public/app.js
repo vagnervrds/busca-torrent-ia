@@ -17,6 +17,7 @@ let delugeEventSource = null;
 
 let delugeRemoveTargetId = null;
 let delugeTorrentsCache = {};
+let lastDelugeRenderSignature = '';
 
 // Função Utilitária para Sanitizar HTML
 function escapeHtml(str) {
@@ -398,7 +399,10 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshDelugeBtn.addEventListener('click', fetchDelugeTorrents);
 
   downloadAllDelugeBtn.addEventListener('click', downloadAllTorrentsInDeluge);
-  searchDelugeInput.addEventListener('input', () => renderDelugeTorrents(delugeTorrentsCache));
+  searchDelugeInput.addEventListener('input', () => {
+    lastDelugeRenderSignature = '';
+    renderDelugeTorrents(delugeTorrentsCache);
+  });
   if (deleteDelugeSearchResultsBtn) deleteDelugeSearchResultsBtn.addEventListener('click', deleteDelugeSearchResults);
   clearDelugeErrorsBtn.addEventListener('click', clearDelugeErrors);
 
@@ -1442,7 +1446,7 @@ async function testAiConnection() {
       if (statusContainer) statusContainer.className = 'flex items-center gap-3 p-4 rounded-xl border border-rose-500/30 bg-rose-50/50 dark:bg-rose-950/10';
       if (statusTitle) statusTitle.innerText = 'Parâmetros inválidos';
       if (statusSubtitle) statusSubtitle.innerText = 'A URL Base da API é obrigatória.';
-      if (errorText) errorText.innerText = 'A URL Base da API não foi preenchida. Por favor, forneça o endereço da API (ex: http://localhost:8045/v1 ou https://api.openai.com/v1).';
+      if (errorText) errorText.innerText = 'A URL Base da API não foi preenchida. Por favor, forneça o endereço da API (ex: https://openrouter.ai/api/v1 ou https://api.openai.com/v1).';
       if (errorContainer) errorContainer.classList.remove('hidden');
       return;
     }
@@ -2230,88 +2234,122 @@ async function fetchSearches() {
 
 
 
-// Seleciona e exibe uma busca do histórico
+// Aplica e renderiza os dados da busca selecionada na UI
+function applySearchDetailData(searchData) {
+  activeSearchData.results = searchData.results || [];
+  activeSearchData.logs = searchData.logs || [];
 
+  activeSearchQueryTitle.innerText = `Busca: "${searchData.query}"`;
+  activeSearchTitle.innerText = searchData.query;
+  activeSearchDate.innerText = new Date(searchData.createdAt).toLocaleString('pt-BR');
+
+  updateActiveSearchStatusUI(searchData.status);
+  updateActiveSearchMetaUI(searchData.type, searchData.episodesCount);
+
+  if (activeSearchInitialSourceBadge) {
+    if (searchData.initialSource) {
+      const src = (searchSources || []).find(s => String(s.id) === String(searchData.initialSource) || s.name.toLowerCase() === String(searchData.initialSource).toLowerCase());
+      const srcName = src ? src.name : searchData.initialSource;
+      activeSearchInitialSourceBadge.innerHTML = `<i class="ph-bold ph-globe-hemisphere-west mr-1"></i> Início: ${srcName}`;
+      activeSearchInitialSourceBadge.classList.remove('hidden');
+    } else {
+      activeSearchInitialSourceBadge.innerHTML = `<i class="ph-bold ph-sparkle mr-1"></i> Início: Automático (IA)`;
+      activeSearchInitialSourceBadge.classList.remove('hidden');
+    }
+  }
+
+  renderLogs();
+  renderResults();
+
+  newSearchSection.classList.add('hidden');
+  activeSearchSection.classList.remove('hidden');
+  settingsSection.classList.add('hidden'); // Oculta configurações
+  delugeSection.classList.add('hidden');
+  closeDelugeSSE();
+
+  renderSearchesList();
+}
+
+// Salva em cache local com rotação de itens para não ocupar memória do navegador
+function saveSearchDetailToLocalCache(id, data) {
+  try {
+    const key = `cached_search_detail_${id}`;
+    const toSave = {
+      ...data,
+      // Guarda no máximo os últimos 80 logs para economizar memória e espaço
+      logs: (data.logs || []).slice(-80)
+    };
+    localStorage.setItem(key, JSON.stringify(toSave));
+
+    const indexKey = 'cached_search_details_keys';
+    let keys = [];
+    try { keys = JSON.parse(localStorage.getItem(indexKey) || '[]'); } catch (e) {}
+    keys = keys.filter(k => k !== id);
+    keys.unshift(id);
+    if (keys.length > 15) {
+      const excess = keys.splice(15);
+      excess.forEach(remId => localStorage.removeItem(`cached_search_detail_${remId}`));
+    }
+    localStorage.setItem(indexKey, JSON.stringify(keys));
+  } catch (e) {}
+}
+
+// Seleciona e exibe uma busca do histórico usando SWR (Instantâneo com revalidação em background)
 async function selectSearch(id) {
-
   activeSearchId = id;
-
   closeSSE();
 
-  
-
-  try {
-
-    const res = await fetch(`/api/searches/${id}`);
-
-    if (!res.ok) throw new Error("Erro ao carregar detalhes da busca");
-
-    const searchData = await res.json();
-
-    
-
-    activeSearchData.results = searchData.results || [];
-
-    activeSearchData.logs = searchData.logs || [];
-
-    
-
-    activeSearchQueryTitle.innerText = `Busca: "${searchData.query}"`;
-
-    activeSearchTitle.innerText = searchData.query;
-
-    activeSearchDate.innerText = new Date(searchData.createdAt).toLocaleString('pt-BR');
-
-    
-
-    updateActiveSearchStatusUI(searchData.status);
-
-    updateActiveSearchMetaUI(searchData.type, searchData.episodesCount);
-
-    if (activeSearchInitialSourceBadge) {
-      if (searchData.initialSource) {
-        const src = (searchSources || []).find(s => String(s.id) === String(searchData.initialSource) || s.name.toLowerCase() === String(searchData.initialSource).toLowerCase());
-        const srcName = src ? src.name : searchData.initialSource;
-        activeSearchInitialSourceBadge.innerHTML = `<i class="ph-bold ph-globe-hemisphere-west mr-1"></i> Início: ${srcName}`;
-        activeSearchInitialSourceBadge.classList.remove('hidden');
-      } else {
-        activeSearchInitialSourceBadge.innerHTML = `<i class="ph-bold ph-sparkle mr-1"></i> Início: Automático (IA)`;
-        activeSearchInitialSourceBadge.classList.remove('hidden');
+  // 1. SWR no cliente: exibe dados locais imediatamente (0ms de atraso percebido)
+  let hadCache = false;
+  const cachedRaw = localStorage.getItem(`cached_search_detail_${id}`);
+  if (cachedRaw) {
+    try {
+      const cachedData = JSON.parse(cachedRaw);
+      hadCache = true;
+      applySearchDetailData(cachedData);
+      if (cachedData.status === 'searching' || cachedData.status === 'pending') {
+        openSSE(id);
+      }
+    } catch (e) {}
+  } else {
+    // Se não tiver detalhes completos salvos, exibe cabeçalho imediato a partir da lista
+    const summary = searches.find(s => s.id === id);
+    if (summary) {
+      activeSearchQueryTitle.innerText = `Busca: "${summary.query}"`;
+      activeSearchTitle.innerText = summary.query;
+      activeSearchDate.innerText = new Date(summary.createdAt).toLocaleString('pt-BR');
+      updateActiveSearchStatusUI(summary.status);
+      updateActiveSearchMetaUI(summary.type, summary.episodesCount);
+      newSearchSection.classList.add('hidden');
+      activeSearchSection.classList.remove('hidden');
+      settingsSection.classList.add('hidden');
+      delugeSection.classList.add('hidden');
+      closeDelugeSSE();
+      renderSearchesList();
+      if (summary.status === 'searching' || summary.status === 'pending') {
+        openSSE(id);
       }
     }
+  }
 
-    
+  // 2. Revalidação em segundo plano (SWR) com o servidor
+  try {
+    const res = await fetch(`/api/searches/${id}`);
+    if (!res.ok) throw new Error("Erro ao carregar detalhes da busca");
+    const freshData = await res.json();
 
-    renderLogs();
+    saveSearchDetailToLocalCache(id, freshData);
+    applySearchDetailData(freshData);
 
-    renderResults();
-
-    
-
-    newSearchSection.classList.add('hidden');
-
-    activeSearchSection.classList.remove('hidden');
-
-    settingsSection.classList.add('hidden'); // Oculta configurações
-
-    delugeSection.classList.add('hidden');
-
-    closeDelugeSSE();
-
-    
-
-    renderSearchesList();
-
-    
-
-    if (searchData.status === 'searching' || searchData.status === 'pending') {
-
-      openSSE(id);
-
+    if (freshData.status === 'searching' || freshData.status === 'pending') {
+      if (!eventSource) {
+        openSSE(id);
+      }
     }
-
   } catch (err) {
-    await alert("Falha ao selecionar busca: " + err.message);
+    if (!hadCache) {
+      await alert("Falha ao selecionar busca: " + err.message);
+    }
   }
 }
 
@@ -2600,11 +2638,24 @@ function closeSSE() {
 function setupDelugeSSE() {
   closeDelugeSSE();
   
-  delugeTorrentsContainer.innerHTML = `
-    <div class="flex flex-col items-center justify-center p-8 text-slate-400 dark:text-slate-500">
-      <div class="animate-spin rounded-full h-8 w-8 border-2 border-brand-500 border-t-transparent mb-3"></div>
-      <p class="text-xs">Conectando ao painel do Deluge...</p>
-    </div>`;
+  // SWR: Se houver cache prévio, renderiza imediatamente sem mostrar tela branca/spinner
+  if (!delugeTorrentsCache || Object.keys(delugeTorrentsCache).length === 0) {
+    const cached = localStorage.getItem('cached_deluge_torrents');
+    if (cached) {
+      try {
+        delugeTorrentsCache = JSON.parse(cached);
+        renderDelugeTorrents(delugeTorrentsCache);
+      } catch (e) {}
+    }
+  }
+
+  if (!delugeTorrentsCache || Object.keys(delugeTorrentsCache).length === 0) {
+    delugeTorrentsContainer.innerHTML = `
+      <div class="flex flex-col items-center justify-center p-8 text-slate-400 dark:text-slate-500">
+        <div class="animate-spin rounded-full h-8 w-8 border-2 border-brand-500 border-t-transparent mb-3"></div>
+        <p class="text-xs">Conectando ao painel do Deluge...</p>
+      </div>`;
+  }
     
   delugeEventSource = new EventSource('/api/deluge/stream');
   
@@ -2622,6 +2673,9 @@ function setupDelugeSSE() {
         delugePanelOfflineAlert.classList.add('hidden');
         
         delugeTorrentsCache = data.torrents || {};
+        try {
+          localStorage.setItem('cached_deluge_torrents', JSON.stringify(delugeTorrentsCache));
+        } catch (e) {}
         renderDelugeTorrents(delugeTorrentsCache);
       } else {
         delugeStatusDot.className = "w-2.5 h-2.5 rounded-full bg-slate-400";
@@ -3386,7 +3440,16 @@ function showDelugeSection() {
   
   renderSearchesList();
   
-  // Inicia SSE para atualização em tempo real
+  // SWR no cliente: se tiver cache prévio salvo, renderiza no mesmo milissegundo
+  const cached = localStorage.getItem('cached_deluge_torrents');
+  if (cached) {
+    try {
+      delugeTorrentsCache = JSON.parse(cached);
+      renderDelugeTorrents(delugeTorrentsCache);
+    } catch (e) {}
+  }
+  
+  // Inicia SSE para atualização e revalidação contínua em tempo real
   setupDelugeSSE();
 }
 
@@ -3561,6 +3624,18 @@ function renderDelugeTorrents(torrents) {
   delugeStatDlSpeed.innerText = formatSpeedBytes(totalDlRate) + '/s';
   delugeStatUlSpeed.innerText = formatSpeedBytes(totalUlRate) + '/s';
 
+  // Otimização para computadores com processador modesto: se os dados dos cards não mudaram,
+  // evita refazer innerHTML e forçar reflow/repaint da tela a cada ciclo
+  const signature = `${searchQuery}|` + filteredIds.map(id => {
+    const t = torrents[id];
+    return `${id}:${t.state}:${(t.progress || 0).toFixed(1)}:${t.download_payload_rate || 0}:${t.upload_payload_rate || 0}:${t.paused}:${Boolean(t.filesMissing)}`;
+  }).join(';');
+
+  if (lastDelugeRenderSignature === signature && delugeTorrentsContainer.children.length > 0) {
+    return;
+  }
+  lastDelugeRenderSignature = signature;
+
   if (filteredIds.length === 0) {
     if (total === 0) {
       delugeTorrentsContainer.innerHTML = `
@@ -3591,8 +3666,12 @@ function renderDelugeTorrents(torrents) {
     else if (t.state === 'Paused') stateBadgeColor = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20';
     else if (t.state === 'Error') stateBadgeColor = 'bg-red-500/10 text-red-650 dark:text-red-400 border border-red-500/20';
 
-    const playPauseButton = t.paused
-      ? `<button onclick="resumeDelugeTorrent('${id}')" class="p-2.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-xl border border-emerald-500/20 transition-all cursor-pointer" title="Retomar Download"><i class="ph-bold ph-play text-sm"></i></button>`
+    const showResumeBtn = t.paused || t.state === 'Error' || Boolean(t.filesMissing);
+    const resumeTitle = (t.state === 'Error' || t.filesMissing)
+      ? 'Retomar / Reiniciar Download (corrigir arquivos ausentes)'
+      : 'Retomar Download';
+    const playPauseButton = showResumeBtn
+      ? `<button onclick="resumeDelugeTorrent('${id}')" class="p-2.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-xl border border-emerald-500/20 transition-all cursor-pointer" title="${resumeTitle}"><i class="ph-bold ph-play text-sm"></i></button>`
       : `<button onclick="pauseDelugeTorrent('${id}')" class="p-2.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-650 dark:text-amber-400 rounded-xl border border-amber-500/20 transition-all cursor-pointer" title="Pausar Download"><i class="ph-bold ph-pause text-sm"></i></button>`;
 
     return `
@@ -3850,23 +3929,35 @@ async function pauseDelugeTorrent(id) {
 
 
 async function resumeDelugeTorrent(id) {
+  const btn = document.querySelector(`button[onclick*="resumeDelugeTorrent('${id}'"]`);
+  const origHtml = btn ? btn.innerHTML : '';
 
   try {
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin text-sm"></i>`;
+    }
 
     const res = await fetch(`/api/deluge/torrents/${id}/resume`, { method: 'POST' });
-
     const data = await res.json();
 
-    if (!data.success) throw new Error(data.error);
+    if (!data.success) throw new Error(data.error || 'Falha ao retomar download');
 
+    if (data.restarted) {
+      showDelugeToast(data.message || 'Arquivos reverificados e download reiniciado!', 'success');
+    } else {
+      showDelugeToast(data.message || 'Download retomado!', 'success');
+    }
+
+    lastDelugeRenderSignature = '';
     fetchDelugeTorrents();
-
   } catch (err) {
-
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml;
+    }
     await alert("Erro ao retomar torrent: " + err.message);
-
   }
-
 }
 
 

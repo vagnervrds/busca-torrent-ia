@@ -49,7 +49,7 @@ Na interface web do **Busca Torrent IA**, acesse a aba **Configurações do Sist
 ### B. Provedor, Modelo e Credenciais de IA (Card 1)
 * **Provedor de IA:** OpenAI Compatible (Gemini / OpenAI / Ollama) ou Anthropic (Claude).
 * **Modelo da IA:** Ex: `gemini-3-flash`, `claude-3-5-sonnet`, `gpt-4o-mini`.
-* **URL Base da API:** URL do gateway ou endpoint da API de IA (ex: `http://localhost:8045/v1`).
+* **URL Base da API:** URL do gateway ou endpoint da API de IA (ex: `https://openrouter.ai/api/v1`).
 * **Token de Acesso (API Key):** Chave de autenticação do modelo de IA.
 * **Botão "Testar Conexão":** Realiza um ping com pergunta de teste para o modelo.
 
